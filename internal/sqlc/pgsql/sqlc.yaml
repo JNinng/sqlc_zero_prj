@@ -2,8 +2,8 @@ version: "2"
 plugins:
   - name: "sqlc_gen_dynamic"
     wasm:
-      url: "https://github.com/JNinng/sqlc_gen_dynamic/releases/download/v0.1.0/sqlc_gen_dynamic-v0.1.0.wasm"
-      sha256: "97dbb974a506941e41b020c6309f6b2e47b27e2b1659c08f9945818d4a7b540e"
+      url: "https://github.com/JNinng/sqlc_gen_dynamic/releases/download/v0.1.1/sqlc_gen_dynamic-v0.1.1.wasm"
+      sha256: "e6e499c85a5b1d5d0c8bab5febb39d8b619997e102031f6bb5f801474ad7f1a7"
     env:
       - "DYNQ_DUMP_REQUEST"
 sql:
