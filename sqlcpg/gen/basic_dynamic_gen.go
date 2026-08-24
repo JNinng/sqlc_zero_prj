@@ -5,6 +5,7 @@
 //	table basic: [@page: 20/400]
 //	table basic: [@default_sort: created_at DESC]
 //	table basic: [@pk: id]
+//	table basic: [@scope: owner_user_id in_any fn_accessible_user_ids(user_id:int) owner_dept_id in_any fn_accessible_dept_ids(user_id:int) owner_user_group_id in_any fn_accessible_group_ids(user_id:int)]
 //	column basic.id: [@dynamic: eq, neq, in, not_in @sortable @selectable]
 //	column basic.status: [@dynamic: eq, neq, in, not_in @sortable @selectable]
 //	column basic.created_by: [@dynamic: eq, neq, in, not_in]
@@ -206,6 +207,13 @@ var BasicField = struct {
 	OwnerUserGroupID: "ownerUserGroupId",
 }
 
+// BasicScope 是 @scope 守卫函数的参数载体:字段为全部守卫声明的标识符参数并集
+// (字面量参数已内联进谓词,不占用字段)。协议门结构性无法设置该字段;
+// 缺省时 List/Count fail-closed 报错(Kind=scope),不静默退化为全量可见。
+type BasicScope struct {
+	UserID int64
+}
+
 // ListBasicParams 是 typed 门的查询参数,供内部调用方直接构造(编译期安全)。
 // 每个字段以单值承载一个操作符,因此无法表达协议门可拒绝的条件冲突——
 // 冲突检测仅在协议门执行。
@@ -257,6 +265,11 @@ type ListBasicParams struct {
 	OwnerUserGroupIDNeq   *int64
 	OwnerUserGroupIDIn    []int64
 	OwnerUserGroupIDNotIn []int64
+	// Scope 是数据权限上下文(表级 @scope 声明的资源必填,fail-closed):
+	// 与业务槽位"零值=条件不参与"不同,Scope 为 nil 时 List/Count 直接报错。
+	// 协议门(Parse)无法设置该字段——客户端请求不构成注入通道;
+	// 注入方式:params.Scope = dynq.ScopeFromContext[BasicScope](ctx) 或直接构造。
+	Scope *BasicScope
 	// OrderBy 指定排序(逻辑字段名与方向);为 nil 时回落表级 @default_sort。
 	OrderBy []dynq.OrderBy
 	// SelectFields 指定动态投影列(逻辑键);为 nil 时默认全量投影(除 @hidden 列)。
@@ -853,7 +866,8 @@ func ParseBasicQuery(q *dynq.Query, opts ...dynq.QueryOption) (ListBasicParams, 
 }
 
 // validateBasicParams 校验 params 在当前 opts 下的合法性,List 与 Count 共用。
-// 禁用字段携带非零值、IsNull 与 NotNull 同时为真均显式报错,不做静默剔除。
+// 禁用字段携带非零值、IsNull 与 NotNull 同时为真均显式报错,不做静默剔除;
+// 声明 @scope 的资源缺省 Scope 时 fail-closed 报错。
 //
 // 参数:
 //   - params: 待复核的查询参数。
@@ -862,6 +876,11 @@ func ParseBasicQuery(q *dynq.Query, opts ...dynq.QueryOption) (ListBasicParams, 
 // 返回值:
 //   - error: 复核通过返回 nil,否则返回结构化错误。
 func validateBasicParams(params ListBasicParams, cfg *dynq.QueryConfig) error {
+	// 数据权限 fail-closed:声明 @scope 的表缺省 Scope 时显式报错,
+	// 宁可拒绝服务也不静默退化为全量可见。
+	if params.Scope == nil {
+		return dynq.ErrScopeRequired()
+	}
 	if cfg.WhereDisabled("id") && (params.ID != nil || params.IDNeq != nil || params.IDIn != nil || params.IDNotIn != nil) {
 		return dynq.NewErr(dynq.KindWhere, "id", "field disabled in this context", -1)
 	}
@@ -896,7 +915,9 @@ func validateBasicParams(params ListBasicParams, cfg *dynq.QueryConfig) error {
 }
 
 // buildBasicWhere 构建过滤 WHERE 条件,List 与 Count 共用,过滤结果一致。
-// 所有值均经占位符参数化,列名与操作符为白名单字面量。
+// 所有值均经占位符参数化,列名与操作符为白名单字面量;
+// 声明 @scope 的表头部注入数据权限谓词(守卫函数名同为生成期白名单字面量),
+// 与业务条件 AND 组合,total 与 items 的权限视图天然一致
 //
 // 参数:
 //   - params: 已通过 validate 形态复核的查询参数。
@@ -905,6 +926,15 @@ func validateBasicParams(params ListBasicParams, cfg *dynq.QueryConfig) error {
 //   - []sq.Sqlizer: 按 AND 语义组合的过滤条件列表。
 func buildBasicWhere(params ListBasicParams) []sq.Sqlizer {
 	var conds []sq.Sqlizer
+	// 数据权限谓词(@scope):多守卫 OR 组合,与业务条件 AND;列名/操作符/
+	// 守卫函数名/字面量参数为生成期白名单字面量,标识符参数经占位符参数化;
+	// IN-子查询与不相关标量函数在单条语句内只求值一次;params.Scope 非 nil
+	// 已由 validate 保证。
+	conds = append(conds, sq.Or{
+		sq.Expr("(fn_accessible_user_ids(?) IS NULL OR owner_user_id = ANY(fn_accessible_user_ids(?)))", params.Scope.UserID, params.Scope.UserID),
+		sq.Expr("(fn_accessible_dept_ids(?) IS NULL OR owner_dept_id = ANY(fn_accessible_dept_ids(?)))", params.Scope.UserID, params.Scope.UserID),
+		sq.Expr("(fn_accessible_group_ids(?) IS NULL OR owner_user_group_id = ANY(fn_accessible_group_ids(?)))", params.Scope.UserID, params.Scope.UserID),
+	})
 	if params.ID != nil {
 		conds = append(conds, sq.Eq{"id": *params.ID})
 	}

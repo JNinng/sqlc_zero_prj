@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-// 基础字段示例表 [@default_sort: created_at DESC @pk: id @page: 20/400]
+// 基础字段示例表 [@scope: owner_user_id in_any fn_accessible_user_ids(user_id:int) owner_dept_id in_any fn_accessible_dept_ids(user_id:int) owner_user_group_id in_any fn_accessible_group_ids(user_id:int) @default_sort: created_at DESC @pk: id @page: 20/400]
 type Basic struct {
 	// 主键 ID [@dynamic: exact, in @sortable @selectable]
 	ID int64 `db:"id" json:"id"`
@@ -532,7 +532,7 @@ type SysTranslation struct {
 	TenantID string `db:"tenant_id" json:"tenant_id"`
 }
 
-// 用户表 [@default_sort: created_at DESC @pk: id @page: 20/400]
+// 用户表 [@scope: owner_user_id in_any fn_accessible_user_ids(user_id:int) owner_dept_id in_any fn_accessible_dept_ids(user_id:int) owner_user_group_id in_any fn_accessible_group_ids(user_id:int) @default_sort: created_at DESC @pk: id @page: 20/400]
 type SysUser struct {
 	// 用户 ID [@dynamic: exact, in @sortable @selectable]
 	ID int64 `db:"id" json:"id"`

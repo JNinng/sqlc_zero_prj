@@ -24,7 +24,7 @@ CREATE TABLE public.basic
 CREATE INDEX idx_basic_owner_user ON public.basic USING btree (owner_user_id);
 CREATE INDEX idx_basic_owner_dept ON public.basic USING btree (owner_dept_id);
 CREATE INDEX idx_basic_owner_user_group ON public.basic USING btree (owner_user_group_id);
-COMMENT ON TABLE public.basic IS '基础字段示例表 [@default_sort: created_at DESC @pk: id @page: 20/400]';
+COMMENT ON TABLE public.basic IS '基础字段示例表 [@scope: owner_user_id in_any fn_accessible_user_ids(user_id:int) owner_dept_id in_any fn_accessible_dept_ids(user_id:int) owner_user_group_id in_any fn_accessible_group_ids(user_id:int) @default_sort: created_at DESC @pk: id @page: 20/400]';
 
 -- Column comments
 
@@ -466,7 +466,7 @@ CREATE TABLE public.sys_user
 CREATE UNIQUE INDEX sys_user_tenant_name_un ON public.sys_user USING btree (tenant_id, name) WHERE deleted_at IS NULL;
 CREATE UNIQUE INDEX sys_user_tenant_email_un ON public.sys_user USING btree (tenant_id, email) WHERE deleted_at IS NULL AND email IS NOT NULL;
 CREATE UNIQUE INDEX sys_user_tenant_phone_un ON public.sys_user USING btree (tenant_id, phone) WHERE deleted_at IS NULL AND phone IS NOT NULL;
-COMMENT ON TABLE public.sys_user IS '用户表 [@default_sort: created_at DESC @pk: id @page: 20/400]';
+COMMENT ON TABLE public.sys_user IS '用户表 [@scope: owner_user_id in_any fn_accessible_user_ids(user_id:int) owner_dept_id in_any fn_accessible_dept_ids(user_id:int) owner_user_group_id in_any fn_accessible_group_ids(user_id:int) @default_sort: created_at DESC @pk: id @page: 20/400]';
 
 -- Column comments
 
