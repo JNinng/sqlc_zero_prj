@@ -278,6 +278,17 @@ VALUES (9, 1, 1, '2026-06-01 11:15:00.000', 1, '2026-06-01 11:15:00.000', NULL, 
         '{scrypt}$e0801$yVcA71vEiZj0CtnDIGwcXLkxU4e5p32yOlBIjss1SpeWyrPITLNc+AVe/L/SgMwt4R0vcbVpEhGJIAqTTlw1Xw==$fhAHFCCrA42OzBuKj4KYhXSfT4HMCbP2tiGgkmCpIBk=',
         'zhengshi@example.com', '13800000009', NULL, '财务部-指定部门演示', 'zh-CN') ON CONFLICT DO NOTHING;
 
+-- 10. demo-market — 市场部员工，无任何角色；角色 102 分发映射（部门集
+--     {2,5}）的分配演示目标：部门 5 命中映射，但不在任何演示操作者的
+--     数据范围内，用于独立验证"操作者部门命中映射 → 豁免 data_scope
+--     覆盖"分支（fn_can_assign_role 分支一）
+INSERT INTO public.sys_user (id, status, created_by, created_at, updated_by, updated_at, deleted_at, tenant_id,
+                             owner_user_id, owner_dept_id, "name", nickname, "password", email, phone, last_login_at, remark, locale)
+VALUES (10, 1, 1, '2026-06-01 11:20:00.000', 1, '2026-06-01 11:20:00.000', NULL, 't-super-01',
+        1, 5, 'demo-market', '市场演示',
+        '{scrypt}$e0801$yVcA71vEiZj0CtnDIGwcXLkxU4e5p32yOlBIjss1SpeWyrPITLNc+AVe/L/SgMwt4R0vcbVpEhGJIAqTTlw1Xw==$fhAHFCCrA42OzBuKj4KYhXSfT4HMCbP2tiGgkmCpIBk=',
+        'demo-market@example.com', '13800000010', NULL, '市场部-分配演示目标', 'zh-CN') ON CONFLICT DO NOTHING;
+
 
 -- ===========================
 -- 6. 用户角色映射表 (sys_user_role_mapping)

@@ -9,7 +9,18 @@ import (
 )
 
 type Querier interface {
+	AssignUserRole(ctx context.Context, arg AssignUserRoleParams) error
+	CanAssignRole(ctx context.Context, arg CanAssignRoleParams) (bool, error)
+	CanTransferOwner(ctx context.Context, arg CanTransferOwnerParams) (bool, error)
+	GetBasicForUpdate(ctx context.Context, id int64) (Basic, error)
+	// 判定与写链路的 named queries：判定函数（operate.sql）与写入语句
+	// 全部走 sqlc 类型层；归属参数用 sqlc.narg（可空 *int64），NULL 语义
+	// 直达判定函数（NULL = 无该维归属），不经过零值转换。
+	// 写入的租户事实取 current_setting('app.tenant_id')（与 RLS WITH CHECK
+	// 同源），操作者事实（created_by/updated_by）由门面从 AuthContext 传入。
 	GetUser(ctx context.Context, id int64) (SysUser, error)
+	HasUserRole(ctx context.Context, arg HasUserRoleParams) (bool, error)
+	UpdateBasicOwner(ctx context.Context, arg UpdateBasicOwnerParams) error
 }
 
 var _ Querier = (*Queries)(nil)

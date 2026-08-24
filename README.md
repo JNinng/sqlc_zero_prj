@@ -13,6 +13,7 @@ schema/RLS/守卫函数/种子/演示一应俱全，业务项目复制后改业�
 |---|---|---|---|
 | PostgreSQL RLS | 租户隔离（绝对边界） | 21 张租户表策略，`tenant_id = current_setting('app.tenant_id')`，ENABLE + FORCE | 漏设变量 → 默认全拒 |
 | `@scope` 守卫 | 数据范围（data_scope 1-7，多角色并集） | 生成代码 WHERE 头部注入守卫谓词 | 缺 Scope → fail-closed 报错 |
+| 判定函数（写侧） | 操作权限（分配/归属转移/行操作） | `operate.sql` 布尔判定 + 同事务先检后写 | 判定 false → ErrDenied 回滚 |
 | sys_menu 功能权限 | 功能入口（能用哪些操作） | 应用层（权限码），不做行过滤 | — |
 
 关键语义（速查）：
@@ -21,6 +22,7 @@ schema/RLS/守卫函数/种子/演示一应俱全，业务项目复制后改业�
 - **@scope 只挂带归属三元组的表**：目前为 `basic` 与 `sys_user`（各三条 OR 守卫）；其余表租户内公共（[ADR-0003](docs/adr/0003-scope-only-on-owner-triple-tables.md)）。
 - **无归属行仅全租户可见**：owner 三列全 NULL 的行经守卫 NULL 放行对 data_scope=7 可见，对其余档位不可见（[ADR-0005](docs/adr/0005-in-any-three-state-guard.md)）。
 - **视角收窄**：守卫与业务过滤 AND 组合——前端传 `ownerUserId=自己` 等条件只能收窄、永不放大。
+- **操作权限（写侧）**：读写同权——操作对象须在操作者数据范围内；归属转移双向可达（旧行可达 + 新归属目标可达，堵"转给看不见的人"的外流旁路）；判定函数与写入同事务先检后写，false 即 `ErrDenied` 回滚（[ADR-0006](docs/adr/0006-operate-permission-check.md)）。角色分配的 `sys_role_allowed_dept`/`scope_dept_id` 成文规则由 `fn_can_assign_role` 落地（此前"仅应用层 enforce"）。
 - 术语表见 [CONTEXT.md](CONTEXT.md)。
 
 ## 目录结构
@@ -30,6 +32,7 @@ sqlcpg/                  生成目录（sqlc 工作区）
   sqlc.yaml              sqlc 配置：内置 go 生成器 + sqlc_gen_dynamic 插件并行
   schema.sql             表结构 + @dynamic/@scope DSL 注释（sqlc 输入）
   rls.sql                RLS 策略 + 守卫函数三件套 + test_u 授权（部署件，非 sqlc 输入）
+  operate.sql            操作权限判定函数三件（写侧执行体；纳入 sqlc schema 列表以解析签名）
   seed.sql               种子（基础数据 + data_scope 演示数据 + basic 归属矩阵）
   gen/                   生成代码（勿手改）
 example/                 独立 Go module（replace => ../），消费方接入范式
@@ -50,13 +53,16 @@ go run ./cmd/demo
 ```
 
 演示自动重建测试库 `sqlc_zero_prj_demo`（DROP + CREATE），按序执行
-`schema.sql → rls.sql → seed.sql`，再以 **test_u 普通角色**连接跑 12 个场景：
+`schema.sql → rls.sql → operate.sql → seed.sql`，再以 **test_u 普通角色**连接跑 16 个场景：
 
 - data_scope 1-7 逐档可见性（同一张 basic 表，不同角色视角结果断言）
 - 多角色并集、视角收窄（业务过滤叠加守卫）
 - fail-closed（未注入 Scope → `Kind=scope` 错误，绝不静默全量）
 - RLS 层独立验证（漏设 `app.tenant_id` → 0 行，即使 Scope 已注入）
 - 守卫资源（SysUser）与无守卫资源（SysDictData）对照
+- 操作权限检测（⑬-⑯）：越权分配拒（数据范围/映射硬条件两个子例，拒绝即无写入）、
+  命中映射豁免放行（目标在数据范围外、仅豁免路径可达）、归属转移双向校验拒
+  （新目标不可达/旧行不可达）、正常转移放行（写后同事务读回确认）
 
 连接覆盖：`ZERO_DEMO_ADMIN_DSN`（管理库）、`ZERO_DEMO_TEST_DSN`（test_u 连测试库）。
 任一断言失败即非零退出，可直接用作 CI 验收。
@@ -86,16 +92,24 @@ fail-closed 校验与三态守卫谓词 `(fn IS NULL OR col = ANY(fn))`。
    列注释按需声明 `@dynamic/@sortable/@selectable/@hidden`；归属列保留
    `@dynamic: exact, in` 作为收窄通道。
 3. **新表补一条 RLS 策略**（照抄 rls.sql 任意一条 + ENABLE/FORCE）。
-4. **门面抄 `example/mod.go`**：`AuthContext{TenantID, UserID}` +
-   `Begin`（事务级 set_config）+ 资源 API（Parse 后注入 Scope 再 List/Count）。
-5. **运行连接三条纪律**：普通数据库角色（勿用超级用户，会绕过 RLS）；
+4. **写动作套判定模板**：复杂跨表规则（如角色分配）写具体判定函数
+   `fn_can_xxx(p_operator, ...)`，通用行操作复用 `fn_can_operate_row`，
+   归属转移复用 `fn_can_transfer_owner`（双向可达）；判定与写入同事务
+   先检后写，false 返回 `ErrDenied`（HTTP 403）。判定函数的参数含义、
+   算法与返回语义必须在函数前注释与 COMMENT ON FUNCTION 成文。
+5. **门面抄 `example/mod.go`**：`AuthContext{TenantID, UserID}` +
+   `Begin`（事务级 set_config）+ 资源 API（读：Parse 后注入 Scope 再
+   List/Count；写：判定后写入，named queries 经 `Session.Q()` 实例调用）。
+6. **运行连接三条纪律**：普通数据库角色（勿用超级用户，会绕过 RLS）；
    每事务 `set_config('app.tenant_id', ..., true)`；Scope 只从服务端认证
    上下文注入，永不受前端请求影响。
-6. INSERT 业务行时由应用层强制填充归属三元组至少一项（ADR-0004）。
+7. INSERT 业务行时由应用层强制填充归属三元组至少一项（无归属行仅
+   data_scope=7 可见可操作，ADR-0005）。
 
 ## 边界与后续
 
-- 本仓库只覆盖**查询侧**（动态 List/Count + 权限）；写侧（INSERT/UPDATE/
-  软删的 named queries 与审计字段填充策略）为后续工作。
+- 查询侧完备（动态 List/Count + 权限）；写侧以**检测机制模板**形态交付
+  （角色分配 + 归属转移两条链路端到端，其余表的写侧 named queries 与
+  通用修改/软删流程仍为后续工作）。
 - `sys_dept` 等其余 16 张租户表不做数据范围裁剪（组织树/字典/日志为租户内
   公共数据，管理入口由功能权限控制）；需要时按 basic 模式自行加守卫。

@@ -8,7 +8,9 @@ plugins:
       - "DYNQ_DUMP_REQUEST"
 sql:
   - engine: "postgresql"
-    schema: "schema.sql"
+    schema:
+      - "schema.sql"
+      - "operate.sql"
     queries: "queries.sql"
     gen:
       go:
@@ -21,7 +23,9 @@ sql:
         emit_interface: true
 
   - engine: "postgresql"
-    schema: "schema.sql"
+    schema:
+      - "schema.sql"
+      - "operate.sql"
     queries: "queries.sql"
     codegen:
       - plugin: "sqlc_gen_dynamic"

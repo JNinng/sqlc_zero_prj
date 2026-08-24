@@ -9,10 +9,107 @@ import (
 	"context"
 )
 
+const assignUserRole = `-- name: AssignUserRole :exec
+INSERT INTO public.sys_user_role_mapping (user_id, role_id, tenant_id, created_by)
+VALUES ($1, $2, current_setting('app.tenant_id'), $3)
+ON CONFLICT (user_id, role_id) DO NOTHING
+`
+
+type AssignUserRoleParams struct {
+	UserID    int64 `db:"user_id" json:"user_id"`
+	RoleID    int64 `db:"role_id" json:"role_id"`
+	CreatedBy int64 `db:"created_by" json:"created_by"`
+}
+
+func (q *Queries) AssignUserRole(ctx context.Context, arg AssignUserRoleParams) error {
+	_, err := q.db.Exec(ctx, assignUserRole, arg.UserID, arg.RoleID, arg.CreatedBy)
+	return err
+}
+
+const canAssignRole = `-- name: CanAssignRole :one
+SELECT public.fn_can_assign_role($1, $2, $3) AS ok
+`
+
+type CanAssignRoleParams struct {
+	Operator int64 `db:"operator" json:"operator"`
+	Role     int64 `db:"role" json:"role"`
+	Target   int64 `db:"target" json:"target"`
+}
+
+func (q *Queries) CanAssignRole(ctx context.Context, arg CanAssignRoleParams) (bool, error) {
+	row := q.db.QueryRow(ctx, canAssignRole, arg.Operator, arg.Role, arg.Target)
+	var ok bool
+	err := row.Scan(&ok)
+	return ok, err
+}
+
+const canTransferOwner = `-- name: CanTransferOwner :one
+SELECT public.fn_can_transfer_owner($1,
+                                    $2, $3, $4,
+                                    $5, $6, $7) AS ok
+`
+
+type CanTransferOwnerParams struct {
+	Operator int64  `db:"operator" json:"operator"`
+	OldUser  *int64 `db:"old_user" json:"old_user"`
+	OldDept  *int64 `db:"old_dept" json:"old_dept"`
+	OldGroup *int64 `db:"old_group" json:"old_group"`
+	NewUser  *int64 `db:"new_user" json:"new_user"`
+	NewDept  *int64 `db:"new_dept" json:"new_dept"`
+	NewGroup *int64 `db:"new_group" json:"new_group"`
+}
+
+func (q *Queries) CanTransferOwner(ctx context.Context, arg CanTransferOwnerParams) (bool, error) {
+	row := q.db.QueryRow(ctx, canTransferOwner,
+		arg.Operator,
+		arg.OldUser,
+		arg.OldDept,
+		arg.OldGroup,
+		arg.NewUser,
+		arg.NewDept,
+		arg.NewGroup,
+	)
+	var ok bool
+	err := row.Scan(&ok)
+	return ok, err
+}
+
+const getBasicForUpdate = `-- name: GetBasicForUpdate :one
+SELECT id, status, created_by, created_at, updated_by, updated_at, deleted_at, tenant_id, owner_user_id, owner_dept_id, owner_user_group_id
+FROM public.basic
+WHERE id = $1
+FOR UPDATE
+`
+
+func (q *Queries) GetBasicForUpdate(ctx context.Context, id int64) (Basic, error) {
+	row := q.db.QueryRow(ctx, getBasicForUpdate, id)
+	var i Basic
+	err := row.Scan(
+		&i.ID,
+		&i.Status,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedBy,
+		&i.UpdatedAt,
+		&i.DeletedAt,
+		&i.TenantID,
+		&i.OwnerUserID,
+		&i.OwnerDeptID,
+		&i.OwnerUserGroupID,
+	)
+	return i, err
+}
+
 const getUser = `-- name: GetUser :one
+
 SELECT id, status, name, nickname, password, email, phone, remark, locale, last_login_at, failed_count, locked_until, created_by, created_at, updated_by, updated_at, deleted_at, tenant_id, owner_user_id, owner_dept_id, owner_user_group_id FROM sys_user WHERE id = $1
 `
 
+// 判定与写链路的 named queries：判定函数（operate.sql）与写入语句
+// 全部走 sqlc 类型层；归属参数用 sqlc.narg（可空 *int64），NULL 语义
+// 直达判定函数（NULL = 无该维归属），不经过零值转换。
+// 写入的租户事实取 current_setting('app.tenant_id')（与 RLS WITH CHECK
+// 同源），操作者事实（created_by/updated_by）由门面从 AuthContext 传入。
 func (q *Queries) GetUser(ctx context.Context, id int64) (SysUser, error) {
 	row := q.db.QueryRow(ctx, getUser, id)
 	var i SysUser
@@ -40,4 +137,51 @@ func (q *Queries) GetUser(ctx context.Context, id int64) (SysUser, error) {
 		&i.OwnerUserGroupID,
 	)
 	return i, err
+}
+
+const hasUserRole = `-- name: HasUserRole :one
+SELECT EXISTS (SELECT 1
+               FROM public.sys_user_role_mapping
+               WHERE user_id = $1
+                 AND role_id = $2) AS has
+`
+
+type HasUserRoleParams struct {
+	UserID int64 `db:"user_id" json:"user_id"`
+	RoleID int64 `db:"role_id" json:"role_id"`
+}
+
+func (q *Queries) HasUserRole(ctx context.Context, arg HasUserRoleParams) (bool, error) {
+	row := q.db.QueryRow(ctx, hasUserRole, arg.UserID, arg.RoleID)
+	var has bool
+	err := row.Scan(&has)
+	return has, err
+}
+
+const updateBasicOwner = `-- name: UpdateBasicOwner :exec
+UPDATE public.basic
+SET owner_user_id       = $1,
+    owner_dept_id       = $2,
+    owner_user_group_id = $3,
+    updated_by          = $4
+WHERE id = $5
+`
+
+type UpdateBasicOwnerParams struct {
+	OwnerUser  *int64 `db:"owner_user" json:"owner_user"`
+	OwnerDept  *int64 `db:"owner_dept" json:"owner_dept"`
+	OwnerGroup *int64 `db:"owner_group" json:"owner_group"`
+	UpdatedBy  int64  `db:"updated_by" json:"updated_by"`
+	ID         int64  `db:"id" json:"id"`
+}
+
+func (q *Queries) UpdateBasicOwner(ctx context.Context, arg UpdateBasicOwnerParams) error {
+	_, err := q.db.Exec(ctx, updateBasicOwner,
+		arg.OwnerUser,
+		arg.OwnerDept,
+		arg.OwnerGroup,
+		arg.UpdatedBy,
+		arg.ID,
+	)
+	return err
 }
