@@ -7,7 +7,7 @@
 --
 -- 内容：
 --   1. fn_touch_updated_at 触发器（updated_at 兜底刷新，批量挂载）
---   2. 守卫函数三件套（@scope 的执行体， RETURNS TABLE 行集形态）
+--   2. 守卫函数三件套（@scope 的执行体，int8[] 数组三态契约）
 --   3. 21 张租户表的 RLS 租户隔离策略（ENABLE + FORCE，未设置默认全拒）
 --   4. test_u 演示用户及授权（普通角色，真实承受 RLS；GRANT CONNECT ON
 --      DATABASE 依赖库名，由部署方/example 动态执行，不在本文件）
