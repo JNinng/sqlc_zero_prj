@@ -1,7 +1,7 @@
 # sqlc_zero_prj — 可复制的数据权限体系
 
-以 [basic-db-table](../template/basic-db-table) 的多租户 RBAC 库表为基础，用
-[sqlc](https://sqlc.dev) + 自定义插件 [sqlc_gen_dynamic](../Go/sqlc_gen_dynamic)
+以 [basic-db-table](../../template/basic-db-table) 的多租户 RBAC 库表为基础，用
+[sqlc](https://sqlc.dev) + 自定义插件 [sqlc_gen_dynamic](../sqlc_gen_dynamic)
 生成带行级守卫的动态列表查询，形成的**可整仓复制**的数据权限起步模板：
 schema/RLS/守卫函数/种子/演示一应俱全，业务项目复制后改业务表即可运行。
 
@@ -19,10 +19,10 @@ schema/RLS/守卫函数/种子/演示一应俱全，业务项目复制后改业�
 关键语义（速查）：
 
 - **守卫函数单参 + 数组三态**：`fn_accessible_user_ids/dept_ids/group_ids(p_user_id)`，角色→数据范围的推导在库内完成，撤销角色下一笔查询即时生效（[ADR-0002](docs/adr/0002-single-param-guard-functions.md)）；返回 `NULL`=全租户不限（仅 data_scope=7 分支）、`{}`=拒绝一切、非空数组=多角色并集，由插件 v0.1.2 的 `in_any` 守卫消费（[ADR-0005](docs/adr/0005-in-any-three-state-guard.md)）。
-- **@scope 只挂带归属三元组的表**：目前为 `basic` 与 `sys_user`（各三条 OR 守卫）；其余表租户内公共（[ADR-0003](docs/adr/0003-scope-only-on-owner-triple-tables.md)）。
+- **@scope 只挂带归属三元组的表**：挂载清单以 `sqlcpg/schema.sql` 的表注释为准（模板内为 `basic` 与 `sys_user`）；其余表租户内公共（[ADR-0003](docs/adr/0003-scope-only-on-owner-triple-tables.md)）。
 - **无归属行仅全租户可见**：owner 三列全 NULL 的行经守卫 NULL 放行对 data_scope=7 可见，对其余档位不可见（[ADR-0005](docs/adr/0005-in-any-three-state-guard.md)）。
 - **视角收窄**：守卫与业务过滤 AND 组合——前端传 `ownerUserId=自己` 等条件只能收窄、永不放大。
-- **操作权限（写侧）**：读写同权——操作对象须在操作者数据范围内；归属转移双向可达（旧行可达 + 新归属目标可达，堵"转给看不见的人"的外流旁路）；判定函数与写入同事务先检后写，false 即 `ErrDenied` 回滚（[ADR-0006](docs/adr/0006-operate-permission-check.md)）。角色分配的 `sys_role_allowed_dept`/`scope_dept_id` 成文规则由 `fn_can_assign_role` 落地（此前"仅应用层 enforce"）。
+- **操作权限（写侧）**：读写同权——操作对象须在操作者数据范围内；归属转移双向可达（旧行可达 + 新归属目标可达，堵"转给看不见的人"的外流旁路）；判定函数与写入同事务先检后写，false 即 `ErrDenied` 回滚（[ADR-0006](docs/adr/0006-operate-permission-check.md)）。角色分配的 `sys_role_allowed_dept`/`scope_dept_id` 成文规则由 `fn_can_assign_role` 在库内落地执行。
 - 术语表见 [CONTEXT.md](CONTEXT.md)。
 
 ## 目录结构
@@ -37,8 +37,8 @@ sqlcpg/                  生成目录（sqlc 工作区）
   gen/                   生成代码（勿手改）
 example/                 独立 Go module（replace => ../），消费方接入范式
   mod.go                 门面：AuthContext → RLS 会话注入 → Scope 注入 → List/Count
-  cmd/demo/main.go       可运行验收：重建测试库 + 12 场景断言
-docs/adr/                架构决策记录 0001-0004
+  cmd/demo/main.go       可运行验收：重建测试库 + 全场景断言
+docs/adr/                架构决策记录（ADR）
 CONTEXT.md               领域术语表
 ```
 
@@ -53,7 +53,7 @@ go run ./cmd/demo
 ```
 
 演示自动重建测试库 `sqlc_zero_prj_demo`（DROP + CREATE），按序执行
-`schema.sql → rls.sql → operate.sql → seed.sql`，再以 **test_u 普通角色**连接跑 16 个场景：
+`schema.sql → rls.sql → operate.sql → seed.sql`，再以 **test_u 普通角色**连接跑全部验收场景：
 
 - data_scope 1-7 逐档可见性（同一张 basic 表，不同角色视角结果断言）
 - 多角色并集、视角收窄（业务过滤叠加守卫）
@@ -111,5 +111,5 @@ fail-closed 校验与三态守卫谓词 `(fn IS NULL OR col = ANY(fn))`。
 - 查询侧完备（动态 List/Count + 权限）；写侧以**检测机制模板**形态交付
   （角色分配 + 归属转移两条链路端到端，其余表的写侧 named queries 与
   通用修改/软删流程仍为后续工作）。
-- `sys_dept` 等其余 16 张租户表不做数据范围裁剪（组织树/字典/日志为租户内
+- `sys_dept` 等其余租户表不做数据范围裁剪（组织树/字典/日志为租户内
   公共数据，管理入口由功能权限控制）；需要时按 basic 模式自行加守卫。

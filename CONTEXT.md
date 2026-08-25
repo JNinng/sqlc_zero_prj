@@ -20,7 +20,7 @@ _Avoid_: 数据权限（泛指时混淆数据范围与功能权限两个维度�
 _Avoid_: 写权限（易被误解为 RLS WITH CHECK）、编辑权
 
 **归属三元组**:
-业务模板行的三个归属列 owner_user_id / owner_dept_id / owner_user_group_id，是数据范围守卫的过滤目标；仅 basic 与 sys_user 携带。
+业务模板行的三个归属列 owner_user_id / owner_dept_id / owner_user_group_id，是数据范围守卫的过滤目标（模板内 `basic` 与 `sys_user` 携带）。
 
 **视角收窄**:
 在权限边界内进一步收缩可见集的查询手段：对归属列使用业务过滤条件。守卫与业务过滤 AND 组合，只能收窄、永不放大。
