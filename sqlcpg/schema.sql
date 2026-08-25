@@ -205,6 +205,8 @@ END;
 $function$
 ;
 
+COMMENT ON FUNCTION public.fn_maintain_dept_closure() IS '闭包表维护：sys_dept 增删改后自动维护 sys_dept_closure。输入校验拒绝自身为父/父级不存在或已删除/跨租户/移入自身子树（环）；软删（deleted_at 置非空）等价 DELETE、恢复等价 INSERT；存在未删除子部门时拒绝删除（自叶向根逐层删）；DELETE 清理 {祖先∪自身}×子树，保留子树内部关系';
+
 -- Table Triggers
 -- 监听 deleted_at：软删除等价 DELETE 分支、恢复等价 INSERT 分支（见函数头注释）
 

@@ -1,10 +1,13 @@
-// Package example 是消费方接入范式示范（门面，mod.go）：
-// 展示业务项目以最少的胶水代码把生成层接入认证上下文——
+// Package example 是给业务项目抄的接入示范（门面，mod.go）：
+// 展示怎么用最少的胶水代码把生成层接起来——
 //
-//	AuthContext → RLS 会话注入（事务级 set_config）→ @scope 守卫注入 → Parse/List/Count
+//	AuthContext（登录后拿到的租户/用户）
+//	  → Begin：开事务并设置 app.tenant_id（RLS 需要）
+//	  → 列表查询：解析前端查询条件，注入当前用户，调 List/Count
+//	  → 写入：先调权限判断函数，通过才执行写入
 //
-// 封装范围刻意精简：两个守卫资源（Basic / SysUser）+ 一个无守卫资源
-// （SysDictData）覆盖全部形态，其余表按同模式复制即可。
+// 封装范围刻意精简：两张带 @scope 的表（Basic / SysUser）加一张
+// 不带的表（SysDictData）覆盖了全部情况，其余表照抄同样的写法。
 package example
 
 import (
@@ -19,9 +22,10 @@ import (
 	gen "sqlc_zero_prj/sqlcpg/gen"
 )
 
-// AuthContext 是认证中间件产出的最小身份事实：
-// TenantID 命中 RLS 会话变量 app.tenant_id；UserID 命中守卫函数入参。
-// 数据范围推导不在应用层——守卫函数在库内由 UserID 推出（ADR-0002）。
+// AuthContext 是登录后从认证信息里拿到的两个值：
+// TenantID 写进会话变量 app.tenant_id（RLS 靠它隔离租户）；
+// UserID 传给权限过滤函数和判断函数算可见范围。
+// 用户有什么角色、能看到什么，全部在数据库里算，应用层不用管。
 type AuthContext struct {
 	TenantID string
 	UserID   int64
@@ -36,9 +40,9 @@ type Session struct {
 	q    *gen.Queries
 }
 
-// Q 返回绑定本事务的 sqlc 查询集。named queries（GetUser/判定/写入等）
-// 均为 *Queries 的方法：先 New(db) 实例化再调用，不是包级函数——
-// 与动态查询（ParseXxx/ListXxx 顶层函数、显式传 DBTX）是两种生成风格。
+// Q 返回绑定本事务的 sqlc 查询集。命名查询（GetUser、权限判断、写入）
+// 都是 *Queries 上的方法，要先 New(db) 再调用——注意和动态查询不同，
+// 动态查询（ParseXxx/ListXxx）是顶层函数，db 作为参数显式传入。
 func (s *Session) Q() *gen.Queries {
 	if s.q == nil {
 		s.q = gen.New(s.tx)
@@ -69,8 +73,8 @@ func (s *Session) Tx() pgx.Tx { return s.tx }
 // Auth 返回本会话的身份事实。
 func (s *Session) Auth() AuthContext { return s.auth }
 
-// RoleScope 是"角色 → 数据范围"叙述链的一环，仅用于演示打印：
-// 守卫函数在库内做同样的推导，应用层不依赖它做任何判断。
+// RoleScope 只在演示打印时用：显示某个用户有哪些角色、每个角色的
+// 数据范围是什么。真正的权限计算都在数据库里做，应用层不靠它判断。
 type RoleScope struct {
 	Name      string
 	DataScope int16
@@ -89,9 +93,8 @@ func DescribeDataScope(v int16) string {
 	return fmt.Sprintf("未知(%d)", v)
 }
 
-// MyRoles 返回当前用户的有效角色及其 data_scope。
-// 演示"全链路"：从映射表与角色表读出推导输入，叙述守卫函数在库内
-// 完成的同一段推导。
+// MyRoles 返回当前用户的角色和数据范围（演示打印用）。
+// 数据库里的权限过滤函数做的也是同样的查询。
 func (s *Session) MyRoles(ctx context.Context) ([]RoleScope, error) {
 	rows, err := s.tx.Query(ctx, `
 		SELECT r."name", r.data_scope
@@ -115,11 +118,13 @@ func (s *Session) MyRoles(ctx context.Context) ([]RoleScope, error) {
 }
 
 // ------------------------------------------------------------
-// 守卫资源封装范式：Parse 之后、调用之前，Scope 只能从服务端
-// AuthContext 注入——协议门结构性无法触达该字段（缺省即 fail-closed）。
+// 列表查询的封装套路：先解析前端传来的查询条件，再把当前用户
+// 塞进 Scope 字段，最后调 List/Count。Scope 只能由服务端代码设置，
+// 前端请求里根本没有这个字段；忘了设置会直接报错（不会退化成
+// 看到全部数据）。
 // ------------------------------------------------------------
 
-// BasicAPI 是业务模板表（带 @scope 三守卫）的资源门面。
+// BasicAPI 是业务模板表 basic 的接口（表配了 @scope，列表按权限过滤）。
 type BasicAPI struct{}
 
 func (BasicAPI) List(ctx context.Context, s *Session, q *dynq.Query, opts ...dynq.QueryOption) (dynq.Result[gen.Basic], error) {
@@ -145,7 +150,7 @@ func (BasicAPI) QuerySchema(opts ...dynq.QueryOption) dynq.ResourceSchema {
 	return gen.BasicQuerySchema(opts...)
 }
 
-// SysUserAPI 是用户表（带 @scope 三守卫）的资源门面。
+// SysUserAPI 是用户表的接口（表配了 @scope，列表按权限过滤）。
 type SysUserAPI struct{}
 
 func (SysUserAPI) List(ctx context.Context, s *Session, q *dynq.Query, opts ...dynq.QueryOption) (dynq.Result[gen.SysUser], error) {
@@ -167,11 +172,11 @@ func (SysUserAPI) Count(ctx context.Context, s *Session, q *dynq.Query, opts ...
 }
 
 // ------------------------------------------------------------
-// 无守卫资源对照范式：租户内公共数据，仅受 RLS 租户隔离，
-// 无需（也无法）注入 Scope——与守卫资源形成形态对照。
+// 对照：没配 @scope 的表。租户内所有人都能看全（只受 RLS 租户
+// 隔离），没有 Scope 可以注入。
 // ------------------------------------------------------------
 
-// SysDictDataAPI 是字典数据表（无 @scope）的资源门面。
+// SysDictDataAPI 是字典数据表的接口（表没配 @scope，不做行级过滤）。
 type SysDictDataAPI struct{}
 
 func (SysDictDataAPI) List(ctx context.Context, s *Session, q *dynq.Query, opts ...dynq.QueryOption) (dynq.Result[gen.SysDictDatum], error) {
@@ -191,34 +196,34 @@ func (SysDictDataAPI) Count(ctx context.Context, s *Session, q *dynq.Query, opts
 }
 
 // ------------------------------------------------------------
-// 操作权限（写侧，ADR-0006）：判定函数 + 同事务先检后写。
-// 判定与写入共用一个事务：判定为假 → ErrDenied → 调用方回滚，
-// 绝不落库；撤销角色对读写判定同时即时生效（共享守卫推导）。
+// 写入前的权限判断：先调数据库里的判断函数，返回 true 才执行写入。
+// 两步在同一个事务里，判断不通过就报错，整个事务回滚，不会写进
+// 任何数据。角色一撤销，下一次判断立刻不通过。
 // ------------------------------------------------------------
 
-// ErrDenied 是操作权限判定拒绝的类型化错误（HTTP 层映射 403），
-// 与 dynq 的 Kind=scope（读侧 fail-closed）并列为模板的两种权限错误形态。
+// ErrDenied 表示权限判断不通过（业务层一般对应 HTTP 403）。
+// 它和 dynq 的 Kind=scope 错误（列表查询忘了注入 Scope）是这套
+// 模板里两种权限相关的错误。
 type ErrDenied struct {
-	Resource string // 资源标识，如 "sys_role" / "basic"
+	Resource string // 操作对象，如 "sys_role" / "basic"
 	Action   string // 动作，如 "assign" / "transfer_owner"
-	Reason   string // 人读的拒绝原因（哪个判定、为什么不放行）
+	Reason   string // 给人看的拒绝原因
 }
 
 func (e *ErrDenied) Error() string {
 	return fmt.Sprintf("denied: %s %s: %s", e.Action, e.Resource, e.Reason)
 }
 
-// OwnerTriplet 是归属三元组的可空表达（指针 nil = 无该维归属，
-// NULL 语义直达判定函数，不经零值转换）。
+// OwnerTriplet 表示一条数据的归属：归属人、归属部门、归属用户组。
+// nil 表示没有这个归属（数据库里存 NULL），不会和 ID=0 混淆。
 type OwnerTriplet struct {
 	UserID   *int64
 	DeptID   *int64
 	GroupID  *int64
 }
 
-// RoleAdminAPI 角色分配：fn_can_assign_role 判定（sys_role_allowed_dept
-// 成文规则的执行体）通过才落 sys_user_role_mapping；tenant_id 取会话
-// 事实（current_setting），created_by 取操作者。
+// RoleAdminAPI 把角色分配给用户：先调 fn_can_assign_role 判断，
+// 通过才写入映射表。tenant_id 自动取会话值，created_by 记操作者。
 type RoleAdminAPI struct{}
 
 func (RoleAdminAPI) Assign(ctx context.Context, s *Session, roleID, targetUserID int64) error {
@@ -231,7 +236,7 @@ func (RoleAdminAPI) Assign(ctx context.Context, s *Session, roleID, targetUserID
 	}
 	if !ok {
 		return &ErrDenied{Resource: "sys_role", Action: "assign", Reason: fmt.Sprintf(
-			"operator=%d 分配 role=%d 给 user=%d 被拒（映射部门集/子树约束/数据范围覆盖，见 fn_can_assign_role 注释）",
+			"operator=%d 分配 role=%d 给 user=%d 被拒（目标部门不符合角色配置，或你看不见目标用户；规则见 fn_can_assign_role）",
 			auth.UserID, roleID, targetUserID)}
 	}
 	return s.Q().AssignUserRole(ctx, gen.AssignUserRoleParams{
@@ -239,16 +244,17 @@ func (RoleAdminAPI) Assign(ctx context.Context, s *Session, roleID, targetUserID
 	})
 }
 
-// TransferOwner 归属转移：锁行（FOR UPDATE）→ fn_can_transfer_owner
-// 双向判定（旧行可达 + 新归属目标可达）→ 通过才 UPDATE；
-// updated_at 由 touch 触发器兜底刷新。行不存在/跨租户（RLS 不可见）
-// 同样以 ErrDenied 表达——读不到即操作不到。
+// TransferOwner 修改一条 basic 数据的归属，三步在同一个事务里：
+// 先锁行读出它现在的归属，再调 fn_can_transfer_owner 判断
+// （这条数据你有权操作 + 新归属的人/部门/组在可见范围内），
+// 通过才执行修改；updated_at 由触发器自动刷新。
+// 行不存在时也返回 ErrDenied——别的租户的数据在 RLS 下查不到。
 func (BasicAPI) TransferOwner(ctx context.Context, s *Session, id int64, to OwnerTriplet) error {
 	auth := s.Auth()
 	row, err := s.Q().GetBasicForUpdate(ctx, id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return &ErrDenied{Resource: "basic", Action: "transfer_owner",
-			Reason: fmt.Sprintf("行 id=%d 不存在或不在本租户（RLS 不可见即不可操作）", id)}
+			Reason: fmt.Sprintf("行 id=%d 不存在或不在本租户", id)}
 	}
 	if err != nil {
 		return err
@@ -263,7 +269,7 @@ func (BasicAPI) TransferOwner(ctx context.Context, s *Session, id int64, to Owne
 	}
 	if !ok {
 		return &ErrDenied{Resource: "basic", Action: "transfer_owner", Reason: fmt.Sprintf(
-			"operator=%d 转移行 id=%d 归属被拒（双向校验：旧行可达与新归属目标可达须同时成立）",
+			"operator=%d 修改行 id=%d 归属被拒（这条数据你无权操作，或新归属的人/部门/组不在你的可见范围内）",
 			auth.UserID, id)}
 	}
 	return s.Q().UpdateBasicOwner(ctx, gen.UpdateBasicOwnerParams{

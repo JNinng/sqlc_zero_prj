@@ -18,17 +18,18 @@ schema/RLS/守卫函数/种子/演示一应俱全，业务项目复制后改业�
 
 关键语义（速查）：
 
-- **守卫函数单参 + 数组三态**：`fn_accessible_user_ids/dept_ids/group_ids(p_user_id)`，角色→数据范围的推导在库内完成，撤销角色下一笔查询即时生效（[ADR-0002](docs/adr/0002-single-param-guard-functions.md)）；返回 `NULL`=全租户不限（仅 data_scope=7 分支）、`{}`=拒绝一切、非空数组=多角色并集，由插件 v0.1.2 的 `in_any` 守卫消费（[ADR-0005](docs/adr/0005-in-any-three-state-guard.md)）。
-- **@scope 只挂带归属三元组的表**：挂载清单以 `sqlcpg/schema.sql` 的表注释为准（模板内为 `basic` 与 `sys_user`）；其余表租户内公共（[ADR-0003](docs/adr/0003-scope-only-on-owner-triple-tables.md)）。
-- **无归属行仅全租户可见**：owner 三列全 NULL 的行经守卫 NULL 放行对 data_scope=7 可见，对其余档位不可见（[ADR-0005](docs/adr/0005-in-any-three-state-guard.md)）。
-- **视角收窄**：守卫与业务过滤 AND 组合——前端传 `ownerUserId=自己` 等条件只能收窄、永不放大。
-- **操作权限（写侧）**：读写同权——操作对象须在操作者数据范围内；归属转移双向可达（旧行可达 + 新归属目标可达，堵"转给看不见的人"的外流旁路）；判定函数与写入同事务先检后写，false 即 `ErrDenied` 回滚（[ADR-0006](docs/adr/0006-operate-permission-check.md)）。角色分配的 `sys_role_allowed_dept`/`scope_dept_id` 成文规则由 `fn_can_assign_role` 在库内落地执行。
+- **权限过滤函数只收一个用户 ID**：`fn_accessible_user_ids/dept_ids/group_ids(用户ID)`，该用户能看到什么由函数内部查角色算出，撤销角色下一次查询立刻生效（[ADR-0002](docs/adr/0002-single-param-guard-functions.md)）。返回 `NULL`=全租户不过滤（仅 data_scope=7）、`{}`=什么都看不到、数组=可见列表（[ADR-0005](docs/adr/0005-in-any-three-state-guard.md)）。
+- **@scope 只挂在有归属字段的表上**：挂载清单以 `sqlcpg/schema.sql` 的表注释为准（模板内为 `basic` 与 `sys_user`）；其余表租户内所有人可见（[ADR-0003](docs/adr/0003-scope-only-on-owner-triple-tables.md)）。
+- **没有归属的数据只有全租户角色能看到**：三个归属字段全空的数据，对其他档位不可见（[ADR-0005](docs/adr/0005-in-any-three-state-guard.md)）。
+- **加过滤条件只会看得更少**：前端传 `ownerUserId=自己` 之类的条件叠加在权限过滤之上，不会放大可见范围。
+- **写之前先判断**（[ADR-0006](docs/adr/0006-operate-permission-check.md)）：能看见就能操作；改归属两头校验（这条数据有权操作 + 新归属的人/部门/组可见）；判断和写入同一事务，不通过就报 `ErrDenied`（403）回滚。角色分配的 `sys_role_allowed_dept`/`scope_dept_id` 规则由 `fn_can_assign_role` 在库内执行。
 - 术语表见 [CONTEXT.md](CONTEXT.md)。
 
 ## 目录结构
 
 ```
 sqlcpg/                  生成目录（sqlc 工作区）
+  README.md              SQL 对象参考：文件/函数/命名查询索引（改动须三处同步）
   sqlc.yaml              sqlc 配置：内置 go 生成器 + sqlc_gen_dynamic 插件并行
   schema.sql             表结构 + @dynamic/@scope DSL 注释（sqlc 输入）
   rls.sql                RLS 策略 + 守卫函数三件套 + test_u 授权（部署件，非 sqlc 输入）

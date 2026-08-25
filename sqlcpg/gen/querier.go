@@ -9,17 +9,28 @@ import (
 )
 
 type Querier interface {
+	// 写入用户-角色映射（判断通过后调用）。租户自动取当前会话的
+	// app.tenant_id；重复分配不报错、不重写
 	AssignUserRole(ctx context.Context, arg AssignUserRoleParams) error
+	// 判断当前用户能否把某个角色分配给某个用户（规则见 fn_can_assign_role）
 	CanAssignRole(ctx context.Context, arg CanAssignRoleParams) (bool, error)
+	// 判断能否把某条数据的归属改成新归属：两头都要过——这条数据本身
+	// 有权操作，新归属的人/部门/组也在可见范围内（见 fn_can_transfer_owner）
 	CanTransferOwner(ctx context.Context, arg CanTransferOwnerParams) (bool, error)
+	// 按 id 锁定并读取一行 basic（FOR UPDATE）：改归属前先拿到它
+	// 现在的归属值，防止并发修改后按旧值判断
 	GetBasicForUpdate(ctx context.Context, id int64) (Basic, error)
-	// 判定与写链路的 named queries：判定函数（operate.sql）与写入语句
-	// 全部走 sqlc 类型层；归属参数用 sqlc.narg（可空 *int64），NULL 语义
-	// 直达判定函数（NULL = 无该维归属），不经过零值转换。
-	// 写入的租户事实取 current_setting('app.tenant_id')（与 RLS WITH CHECK
-	// 同源），操作者事实（created_by/updated_by）由门面从 AuthContext 传入。
+	// 命名查询：读、写、权限判断都走 sqlc 类型层。
+	// 归属类参数用 sqlc.narg（生成 *int64 可空指针），NULL 原样传给
+	// 判断函数，表示"没有这个归属"，不做零值转换。
+	// 每条查询上方的注释会被 sqlc 带进生成的 Go 代码（godoc），
+	// 修改时记得同步。
+	// 按主键查一个用户（RLS 生效：别的租户里查不到）
 	GetUser(ctx context.Context, id int64) (SysUser, error)
+	// 查某个用户是否已拥有某个角色（分配后的结果确认）
 	HasUserRole(ctx context.Context, arg HasUserRoleParams) (bool, error)
+	// 修改一行 basic 的归属（判断通过后调用）。归属参数传 NULL 表示
+	// 清掉该归属；updated_at 由触发器自动刷新，不用手动设置
 	UpdateBasicOwner(ctx context.Context, arg UpdateBasicOwnerParams) error
 }
 

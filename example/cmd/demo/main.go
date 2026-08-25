@@ -1,9 +1,9 @@
 // demo 是数据权限体系的可运行验收入口：重建独立测试库 → 按序应用
 // schema.sql / rls.sql / operate.sql / seed.sql → 以 test_u 普通角色连接
-// 执行 16 个场景，覆盖 data_scope 1-7 逐档可见性、多角色并集、fail-closed、
-// RLS 漏设全拒、视角收窄、守卫资源与无守卫资源对照（[1]-[12]），以及写侧
-// 操作权限检测：越权分配拒、命中映射豁免允、归属转移双向校验、正常
-// 转移放行（[13]-[16]）。任一断言失败即以非零码退出。
+// 执行 16 个场景：[1]-[12] 验证读（各档数据范围能看到哪些行、多角色
+// 并集、忘注入 Scope 直接报错、漏设租户什么都看不到、加过滤条件只能
+// 看得更少）；[13]-[16] 验证写（分配角色、修改归属前的权限判断）。
+// 任一断言失败即以非零码退出。
 //
 // 运行（在仓库根目录）: go run ./example/cmd/demo
 // 连接:管理库默认 postgres://postgresql:root@localhost:5432/postgres，
@@ -143,7 +143,8 @@ func setup(ctx context.Context) error {
 	return nil
 }
 
-// scopeScenario 验证某用户的 basic 表可见集合（守卫三支 OR 的并集）。
+// scopeScenario 验证某个用户能看到 basic 表里的哪些行
+// （归属人/归属部门/归属组三个过滤条件取并集）。
 func (d *demo) scopeScenario(ctx context.Context, title, user string, expect []int64) {
 	fmt.Printf("== %s ==\n", title)
 	err := example.Begin(ctx, d.pool, d.auth(user), func(s *example.Session) error {
@@ -188,7 +189,7 @@ func (d *demo) tenantWideScenario(ctx context.Context) {
 		expect := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
 		fmt.Printf("   可见 basic 行: %v（total=%d）\n", got, total)
 		d.check(slices.Equal(got, expect) && total == 10,
-			fmt.Sprintf("期望 %v/total=10 实得 %v/total=%d；id=8 无归属→经 NULL 放行对全租户可见（in_any 三态，ADR-0005）；id=11 跨租户→RLS 兜底", expect, got, total))
+			fmt.Sprintf("期望 %v/total=10 实得 %v/total=%d；id=8 没有归属，全租户角色能看到（NULL 不过滤）；id=11 是别的租户的数据，RLS 挡住", expect, got, total))
 		return nil
 	})
 	if err != nil {
@@ -198,7 +199,7 @@ func (d *demo) tenantWideScenario(ctx context.Context) {
 }
 
 // narrowScenario [8] 视角收窄：全租户视角叠加业务过滤 ownerUserId=3。
-// 守卫与业务过滤 AND 组合——只能收窄、永不放大。
+// 权限过滤和业务条件是叠加关系：加条件只会让结果更少，不会更多。
 func (d *demo) narrowScenario(ctx context.Context) {
 	fmt.Println("== [8] 视角收窄：全租户视角 + 业务过滤 ownerUserId=3 ==")
 	q := &dynq.Query{Where: []dynq.Condition{{Field: "ownerUserId", Op: "eq", Value: 3}}}
@@ -235,7 +236,8 @@ func (d *demo) failClosedScenario(ctx context.Context) {
 }
 
 // rlsMissingScenario [10] RLS 层独立验证：Scope 已注入但事务未设置
-// app.tenant_id——守卫函数内部查询同受 RLS 约束，可见集合为空。
+// app.tenant_id——权限过滤函数内部的查询同样受 RLS 限制，
+// 什么范围都算不出来，结果为 0 行。
 func (d *demo) rlsMissingScenario(ctx context.Context) {
 	fmt.Println("== [10] RLS 层：漏设 app.tenant_id（admin + Scope，无 set_config） ==")
 	tx, err := d.pool.Begin(ctx)
@@ -262,9 +264,9 @@ func (d *demo) rlsMissingScenario(ctx context.Context) {
 	d.check(total == 0, fmt.Sprintf("期望 0（默认全拒），实得 %d", total))
 }
 
-// sysUserScenario [11] 守卫资源的第二形态：用户列表按数据范围裁剪。
+// sysUserScenario [11] 另一张配了 @scope 的表：用户列表同样按权限过滤。
 func (d *demo) sysUserScenario(ctx context.Context) {
-	fmt.Println("== [11] 守卫资源 SysUser：部门子树视角（zhouba） vs 全租户（admin） ==")
+	fmt.Println("== [11] 用户列表 SysUser：部门子树视角（zhouba） vs 全租户（admin） ==")
 	err := example.Begin(ctx, d.pool, d.auth("zhouba"), func(s *example.Session) error {
 		res, err := example.SysUserAPI{}.List(ctx, s, &dynq.Query{})
 		if err != nil {
@@ -300,9 +302,9 @@ func (d *demo) sysUserScenario(ctx context.Context) {
 	}
 }
 
-// dictScenario [12] 无守卫资源对照：租户内公共数据，仅受 RLS 租户隔离。
+// dictScenario [12] 对照：没配 @scope 的表，租户内所有人都能看全。
 func (d *demo) dictScenario(ctx context.Context) {
-	fmt.Println("== [12] 无守卫资源 SysDictData：租户内公共数据（zhangsan） ==")
+	fmt.Println("== [12] 字典 SysDictData：租户内公共数据，无行级过滤（zhangsan） ==")
 	err := example.Begin(ctx, d.pool, d.auth("zhangsan"), func(s *example.Session) error {
 		total, err := example.SysDictDataAPI{}.Count(ctx, s, &dynq.Query{})
 		if err != nil {
@@ -318,18 +320,18 @@ func (d *demo) dictScenario(ctx context.Context) {
 	}
 }
 
-// assignDeny [13] 越权分配拒绝：data_scope 覆盖兜底失败 / 映射硬条件失败，
-// 拒绝即无写入（先检后写）。
+// assignDeny [13] 越权分配被拒：目标用户看不见、目标部门不符合角色
+// 配置，两种情况都拒绝，且确认没有写入任何数据。
 func (d *demo) assignDenyScenario(ctx context.Context) {
-	fmt.Println("== [13] 操作权限：越权分配拒绝 ==")
-	// zhangsan(可见用户 {2,3,4}) 分 103(无映射、scope_dept_id NULL) 给 sunqi(6)：
-	// 目标不在数据范围 → 覆盖兜底失败 → 拒
+	fmt.Println("== [13] 写入权限：越权分配被拒 ==")
+	// zhangsan(可见用户 {2,3,4}) 分 103 给 sunqi(6)：
+	// 目标用户不在可见范围内，被拒
 	d.assignCheck(ctx, "zhangsan", 103, userID["sunqi"],
-		"目标不在操作者数据范围（无映射角色，data_scope 覆盖兜底失败）")
-	// zhangsan(部门2 命中 102 映射) 分 102(映射 {2,5}) 给 lisi(部门3)：
-	// 操作者命中豁免，但目标部门 ∉ 映射集 → 硬条件拒
+		"目标用户不在操作者可见范围内")
+	// zhangsan(部门2 在 102 的分发配置里) 分 102 给 lisi(部门3)：
+	// 操作者部门虽然命中配置，但目标部门不在配置里，照样被拒
 	d.assignCheck(ctx, "zhangsan", 102, userID["lisi"],
-		"目标部门不在角色映射集（操作者命中豁免也过不了硬条件）")
+		"目标部门不在角色的分发配置里（操作者部门命中配置也没用）")
 }
 
 func (d *demo) assignCheck(ctx context.Context, operator string, role, target int64, why string) {
@@ -351,16 +353,16 @@ func (d *demo) assignCheck(ctx context.Context, operator string, role, target in
 	}
 }
 
-// assignExempt [14] 命中映射豁免放行：目标不在操作者数据范围内，
-// 仅"操作者部门命中角色分发映射"路径放行（fn_can_assign_role 分支一）。
+// assignExempt [14] 特例放行：目标用户不在操作者可见范围内，
+// 但操作者所在部门在角色的分发配置里，照样允许分配。
 func (d *demo) assignExemptScenario(ctx context.Context) {
-	fmt.Println("== [14] 操作权限：命中映射豁免放行（zhouba·部门2 命中 102 映射） ==")
+	fmt.Println("== [14] 写入权限：部门命中角色配置，放行（zhouba·部门2 在 102 的配置里） ==")
 	err := example.Begin(ctx, d.pool, d.auth("zhouba"), func(s *example.Session) error {
-		// 目标 market(10·市场部)：部门 5 ∈ 映射 {2,5}，但 10 ∉ zhouba 可见集 {2,6,7}
-		// → 仅豁免路径放行
+		// 目标 market(10·市场部)：部门 5 在 102 的配置 {2,5} 里，
+		// 但 zhouba 看不见用户 10 → 靠"操作者部门命中配置"这条路放行
 		err := example.RoleAdminAPI{}.Assign(ctx, s, 102, userID["market"])
 		fmt.Printf("   zhouba 分配 role=102 → user=10(市场部): err=%v\n", err)
-		d.check(err == nil, "目标不在数据范围，仅命中映射豁免路径放行")
+		d.check(err == nil, "目标用户不在可见范围内，但操作者部门命中角色配置，放行")
 		if err != nil {
 			return nil
 		}
@@ -368,12 +370,12 @@ func (d *demo) assignExemptScenario(ctx context.Context) {
 		if err != nil {
 			return err
 		}
-		d.check(has, "放行后映射落库（created_by=操作者，tenant_id=会话事实）")
-		// 对照：同一豁免操作者分给 sunqi(部门7 ∉ 映射) → 硬条件拒
+		d.check(has, "放行后映射写入成功（created_by=操作者，tenant_id 取会话值）")
+		// 对照：还是这个操作者，分给 sunqi(部门7 不在配置里) → 被拒
 		err = example.RoleAdminAPI{}.Assign(ctx, s, 102, userID["sunqi"])
 		var den *example.ErrDenied
 		fmt.Printf("   zhouba 分配 role=102 → user=6(前端组): %v\n", err)
-		d.check(errors.As(err, &den), "豁免操作者对映射外部门目标仍拒（硬条件优先）")
+		d.check(errors.As(err, &den), "目标部门不在角色配置里照样被拒")
 		return nil
 	})
 	if err != nil {
@@ -382,21 +384,21 @@ func (d *demo) assignExemptScenario(ctx context.Context) {
 	}
 }
 
-// transferDeny [15] 归属转移双向校验拒绝：新目标不可达 / 旧行不可达。
+// transferDeny [15] 改归属被拒：新归属的人看不见 / 这条数据本身无权操作。
 func (d *demo) transferDenyScenario(ctx context.Context) {
-	fmt.Println("== [15] 操作权限：归属转移双向校验拒绝 ==")
+	fmt.Println("== [15] 写入权限：改归属被拒（两头校验） ==")
 	self := userID["lisi"]
 	wangwu := userID["wangwu"]
 	err := example.Begin(ctx, d.pool, d.auth("lisi"), func(s *example.Session) error {
-		// b1(owner_user=lisi，旧行可达) 转给 wangwu(4 ∉ lisi 集 {3})：新目标不可达
+		// b1(归属人=lisi，lisi 有权操作) 改归属给 wangwu(4，lisi 看不见)：拒
 		err := example.BasicAPI{}.TransferOwner(ctx, s, 1, example.OwnerTriplet{UserID: &wangwu})
 		var den *example.ErrDenied
-		fmt.Printf("   lisi 转移 b1 → wangwu: %v\n", err)
-		d.check(errors.As(err, &den), "新归属目标不可达（看不见的人不能接手数据）")
-		// b2(owner_dept=2，lisi 不可达) 转给 lisi 自己：旧行不可达
+		fmt.Printf("   lisi 改 b1 归属 → wangwu: %v\n", err)
+		d.check(errors.As(err, &den), "新归属人不在可见范围内（看不见的人不能接手数据）")
+		// b2(归属部门=2，lisi 无权操作) 改归属给 lisi 自己：拒
 		err = example.BasicAPI{}.TransferOwner(ctx, s, 2, example.OwnerTriplet{UserID: &self})
-		fmt.Printf("   lisi 转移 b2 → lisi:   %v\n", err)
-		d.check(errors.As(err, &den), "旧行不可达（够不着的行不能动刀）")
+		fmt.Printf("   lisi 改 b2 归属 → lisi:   %v\n", err)
+		d.check(errors.As(err, &den), "这条数据本身无权操作")
 		return nil
 	})
 	if err != nil {
@@ -405,16 +407,17 @@ func (d *demo) transferDenyScenario(ctx context.Context) {
 	}
 }
 
-// transferAllow [16] 归属转移放行：双向可达 → 写入并读回确认；
-// 全租户视角操作无归属行（三态契约的写侧推论，ADR-0005）。
+// transferAllow [16] 改归属成功：两头都通过，写入后读回来确认；
+// 最后演示全租户角色可以操作没有归属的数据。
 func (d *demo) transferAllowScenario(ctx context.Context) {
-	fmt.Println("== [16] 操作权限：归属转移放行 ==")
+	fmt.Println("== [16] 写入权限：改归属成功 ==")
 	newOwner := userID["sunqi"]
 	err := example.Begin(ctx, d.pool, d.auth("zhouba"), func(s *example.Session) error {
-		// b2(owner_dept=2 ∈ zhouba 部门集 {2,7,8}) 转给 sunqi(6 ∈ 用户集 {2,6,7})
+		// b2(归属部门=2，在 zhouba 可见部门 {2,7,8} 内) 改归属给
+		// sunqi(6，在 zhouba 可见用户 {2,6,7} 内)
 		err := example.BasicAPI{}.TransferOwner(ctx, s, 2, example.OwnerTriplet{UserID: &newOwner})
-		fmt.Printf("   zhouba 转移 b2 → sunqi: err=%v\n", err)
-		d.check(err == nil, "双向可达放行（旧行∈部门集，新目标∈用户集）")
+		fmt.Printf("   zhouba 改 b2 归属 → sunqi: err=%v\n", err)
+		d.check(err == nil, "两头都通过：这条数据有权操作，新归属人可见")
 		if err != nil {
 			return nil
 		}
@@ -423,7 +426,7 @@ func (d *demo) transferAllowScenario(ctx context.Context) {
 			return err
 		}
 		fmt.Printf("   读回 b2: owner_user_id=%v\n", deref(row.OwnerUserID))
-		d.check(row.OwnerUserID != nil && *row.OwnerUserID == newOwner, "归属已写入（同事务读回确认）")
+		d.check(row.OwnerUserID != nil && *row.OwnerUserID == newOwner, "归属已修改（同一事务里读回确认）")
 		return nil
 	})
 	if err != nil {
@@ -432,11 +435,11 @@ func (d *demo) transferAllowScenario(ctx context.Context) {
 		return
 	}
 	err = example.Begin(ctx, d.pool, d.auth("admin"), func(s *example.Session) error {
-		// b8(无归属) 转给 wangwu：守卫 NULL=全租户 → 旧行与目标均放行
+		// b8(没有归属) 改归属给 wangwu：全租户角色对数据和目标都直接通过
 		wangwu := userID["wangwu"]
 		err := example.BasicAPI{}.TransferOwner(ctx, s, 8, example.OwnerTriplet{UserID: &wangwu})
-		fmt.Printf("   admin  转移 b8 → wangwu: err=%v\n", err)
-		d.check(err == nil, "全租户可操作无归属行（三态契约写侧推论）")
+		fmt.Printf("   admin  改 b8 归属 → wangwu: err=%v\n", err)
+		d.check(err == nil, "全租户角色可以操作没有归属的数据")
 		if err != nil {
 			return nil
 		}

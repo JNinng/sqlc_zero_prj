@@ -1,21 +1,18 @@
 -- ============================================================
--- rls.sql — 租户隔离 RLS + 行级守卫函数 + 演示数据库用户
+-- rls.sql — 租户隔离策略 + 读侧权限过滤函数 + 演示用户授权
 --
--- 依赖：schema.sql（表结构与 @dynamic/@scope DSL 注释）。在 schema.sql 之后执行。
--- 本文件不是 sqlc 的输入：sqlc 不校验守卫函数存在性（函数名仅做拼接），
--- 部署侧保证 schema.sql → rls.sql → seed.sql 的执行顺序即可。
+-- 在 schema.sql 之后执行；不是 sqlc 的输入文件。
 --
 -- 内容：
---   1. fn_touch_updated_at 触发器（updated_at 兜底刷新，批量挂载）
---   2. 守卫函数三件套（@scope 的执行体，int8[] 数组三态契约）
---   3. 21 张租户表的 RLS 租户隔离策略（ENABLE + FORCE，未设置默认全拒）
---   4. test_u 演示用户及授权（普通角色，真实承受 RLS；GRANT CONNECT ON
---      DATABASE 依赖库名，由部署方/example 动态执行，不在本文件）
+--   1. fn_touch_updated_at 触发器：UPDATE 时兜底刷新 updated_at
+--   2. 三个权限过滤函数：算出"当前用户能看到哪些用户/部门/用户组"，
+--      动态查询（List/Count）会把结果自动拼进 WHERE
+--   3. 21 张租户表的 RLS 策略：会话没设置 app.tenant_id 时什么都
+--      读不到、写不进（默认全拒）
+--   4. test_u 演示用户与授权（GRANT CONNECT 依赖库名，由部署方执行）
 --
--- 与 basic-db-table/fun.sql 的关系：三件套以 fn_perm_user_ids/fn_perm_dept_ids
--- 的语义为蓝本，数组三态契约（NULL=全租户 / {}=拒绝 / 数组=并集）完全同构，
--- 由插件 v0.1.2 的 in_any 守卫消费（生成 (fn IS NULL OR col = ANY(fn))）；
--- 差异仅一处：新增 fn_accessible_group_ids 补齐 owner_user_group_id 维度。
+-- 这三个函数和 basic-db-table/fun.sql 里的 fn_perm_* 是同一套逻辑；
+-- 区别只有一处：这里多一个 fn_accessible_group_ids，补上用户组维度。
 -- ============================================================
 
 
@@ -37,6 +34,8 @@ BEGIN
 END;
 $function$
 ;
+
+COMMENT ON FUNCTION public.fn_touch_updated_at() IS '审计兜底：UPDATE 时若应用层未显式刷新 updated_at（NEW 与 OLD 相同）则代为刷新为 CURRENT_TIMESTAMP；由 rls.sql 的 DO 块批量挂载到所有含 updated_at 列的表。updated_by 承载操作者身份，数据库无法获知，仍由应用层写入';
 
 -- 为所有含 updated_at 列的表批量挂载 BEFORE UPDATE 触发器（重复执行安全）
 DO $$
@@ -60,35 +59,32 @@ $$;
 
 
 -- ============================================================
--- 2. 守卫函数三件套 —— @scope 声明的行级数据范围执行体
+-- 2. 权限过滤函数（读侧）：算出当前用户能看到哪些用户/部门/用户组
 --
---    签名契约：只收当前用户 ID（ADR-0002）。角色 → data_scope 的推导在
---    函数内部完成（sys_user_role_mapping × sys_role），调用方无需也不可
---    传入范围参数；撤销角色对下一笔查询即时生效。
+-- 动态查询会在 WHERE 里自动拼上类似这样的条件（由 schema.sql 表注释
+-- 里的 @scope 声明驱动）：
+--   owner_user_id = ANY(fn_accessible_user_ids(当前用户))
 --
---    返回契约（数组三态，与 basic-db-table/fun.sql 的 fn_perm_* 完全同构，
---    由插件 v0.1.2 的 in_any 守卫消费，生成谓词
---    (fn(...) IS NULL OR col = ANY(fn(...)))，见 ADR-0005）：
---      NULL  不受限（任一有效角色 data_scope=7 全租户）→ 放行全部，
---            含无归属行。NULL 只能由该显式分支返回：in_any 是显式放行
---            方向，函数别处误返 NULL 会放开整表。
---      '{}'  拒绝一切（用户不存在/被禁用/被删除，或无任何有效角色）
---      数组  可见 ID 集合，多角色取并集去重
+-- 三个函数都只接收当前用户 ID。这个用户有哪些角色、能看到什么范围，
+-- 由函数内部查表得出，调用方不传任何权限参数。好处：应用层零权限
+-- 代码，角色一撤销，下一次查询立刻生效。
 --
---    前置条件：会话已 SET app.tenant_id（事务级 set_config）。函数为
---    STABLE + SECURITY INVOKER，内部查询自动受各表 RLS 租户隔离约束
---    （漏设变量时 me/my_roles 皆为空 → 走 '{}' 拒绝分支，不会误入 NULL 放行）。
+-- 返回值三种情况：
+--   NULL   用户有全租户角色（data_scope=7），什么都不过滤
+--   '{}'   用户无效（不存在/禁用/删除）或没有任何有效角色，什么都看不到
+--   数组   能看到的 ID 列表，多个角色取并集
 --
---    有效性判定（贯穿所有分支，同 fun.sql）：
---      当前用户   sys_user.status=1 且 deleted_at IS NULL
---      角色       sys_role.status=1 且 deleted_at IS NULL
---      范围明细   sys_role_id_scope.status=1 且 deleted_at IS NULL
---      目标用户   sys_user.status=1 且 deleted_at IS NULL
---      目标部门   sys_dept.status=1 且 deleted_at IS NULL
---      目标用户组 sys_user_group.status=1 且 deleted_at IS NULL
+-- 注意：NULL 只允许出现在 data_scope=7 的分支。写这些函数时，别的
+-- 地方误返回 NULL 会把整张表放开（查询里的 NULL 是"放行"语义）。
+--
+-- 会话需要已设置 app.tenant_id：函数内部的查询同样受 RLS 限制，
+-- 漏设置时查不到任何角色，返回 '{}'（什么都看不到，不会误放行）。
+--
+-- 各分支只统计有效数据：用户/角色/范围明细/目标对象都要求
+-- status=1 且未删除。
 -- ============================================================
 
--- 2.1 有权访问的用户 ID 集合 → owner_user_id 守卫
+-- fn_accessible_user_ids：当前用户能看到哪些用户（用于 owner_user_id 过滤）
 CREATE OR REPLACE FUNCTION public.fn_accessible_user_ids(p_user_id int8)
     RETURNS int8[]
     STABLE
@@ -165,7 +161,7 @@ scoped AS (
 
     UNION
 
-    -- data_scope=6 用户组（角色经 sys_role_id_scope type=3 指定的组，组内有效成员）
+    -- data_scope=6 用户组：角色指定的组，返回组内成员
     SELECT gm.user_id
     FROM my_roles r
              JOIN public.sys_role_id_scope s ON s.role_id = r.id AND s."type" = 3
@@ -179,19 +175,19 @@ scoped AS (
       AND u.deleted_at IS NULL
 )
 SELECT CASE
-           -- 用户不存在/被禁用/被删除：拒绝一切
+           -- 用户无效（不存在/禁用/已删除）：什么都看不到
            WHEN NOT EXISTS (SELECT 1 FROM me) THEN '{}'::int8[]
-           -- 任一有效角色为全租户：不受限（显式放行，含无归属行）
+           -- 有全租户角色：不过滤（NULL 只允许在这个分支返回）
            WHEN EXISTS (SELECT 1 FROM my_roles WHERE data_scope = 7) THEN NULL::int8[]
-           -- 多角色并集；无有效角色时 array_agg 为 NULL，归一为空集合（默认拒绝）
+           -- 多个角色取并集；没有匹配到任何用户时为空数组（什么都看不到）
            ELSE COALESCE((SELECT array_agg(DISTINCT user_id) FROM scoped), '{}'::int8[])
        END
 $$;
 
-COMMENT ON FUNCTION public.fn_accessible_user_ids(int8) IS '行级守卫：返回当前用户有权访问的用户 ID 数组（@scope owner_user_id 列的执行体，in_any 三态）。NULL=全租户不限(仅 data_scope=7 分支)；{}=拒绝一切；数组=多角色 data_scope 并集。需先 SET app.tenant_id，自动受 RLS 租户隔离';
+COMMENT ON FUNCTION public.fn_accessible_user_ids(int8) IS '权限过滤：返回当前用户能看到哪些用户（列表查询自动用于 owner_user_id 过滤）。NULL=有全租户角色，不过滤；{}=用户无效或没有有效角色，什么都看不到；数组=可见用户的 ID 列表，多个角色取并集。需要会话已设置 app.tenant_id。';
 
 
--- 2.2 有权访问的部门 ID 集合 → owner_dept_id 守卫
+-- fn_accessible_dept_ids：当前用户能看到哪些部门（用于 owner_dept_id 过滤）
 CREATE OR REPLACE FUNCTION public.fn_accessible_dept_ids(p_user_id int8)
     RETURNS int8[]
     STABLE
@@ -213,7 +209,8 @@ my_roles AS (
       AND r.deleted_at IS NULL
 ),
 scoped AS (
-    -- data_scope=1 仅本人：返回本人归属部门，保证本人数据在部门过滤下仍可见
+    -- data_scope=1 仅本人：也算上自己所在部门，
+    -- 保证自己的数据在按部门过滤时仍能看到
     SELECT me.owner_dept_id AS dept_id
     FROM me
              JOIN my_roles r ON r.data_scope = 1
@@ -264,7 +261,7 @@ scoped AS (
 
     UNION
 
-    -- data_scope=6 用户组：组内有效成员归属部门
+    -- data_scope=6 用户组：组内成员所在的部门
     SELECT u.owner_dept_id
     FROM my_roles r
              JOIN public.sys_role_id_scope s ON s.role_id = r.id AND s."type" = 3
@@ -285,12 +282,12 @@ SELECT CASE
        END
 $$;
 
-COMMENT ON FUNCTION public.fn_accessible_dept_ids(int8) IS '行级守卫：返回当前用户有权访问的部门 ID 数组（@scope owner_dept_id 列的执行体，in_any 三态）。NULL=全租户不限(仅 data_scope=7 分支)；{}=拒绝一切；数组=多角色 data_scope 并集。需先 SET app.tenant_id，自动受 RLS 租户隔离';
+COMMENT ON FUNCTION public.fn_accessible_dept_ids(int8) IS '权限过滤：返回当前用户能看到哪些部门（列表查询自动用于 owner_dept_id 过滤）。NULL=有全租户角色，不过滤；{}=用户无效或没有有效角色；数组=可见部门的 ID 列表。"仅本人"角色也会返回自己所在部门，保证自己的数据在按部门过滤时仍能看到。需要会话已设置 app.tenant_id。';
 
 
--- 2.3 有权访问的用户组 ID 集合 → owner_user_group_id 守卫
---     仅两类角色产生组可见性：data_scope=6（角色经 type=3 指定的组）与
---     data_scope=7（全租户组，NULL 放行）；用户/部门类范围不授予组归属可见性。
+-- fn_accessible_group_ids：当前用户能看到哪些用户组（用于 owner_user_group_id 过滤）
+-- 只有两种角色会返回结果：data_scope=6（角色在 sys_role_id_scope 里指定了
+-- 用户组）和 data_scope=7（全部）；其他角色对用户组没有可见性。
 CREATE OR REPLACE FUNCTION public.fn_accessible_group_ids(p_user_id int8)
     RETURNS int8[]
     STABLE
@@ -312,7 +309,7 @@ my_roles AS (
       AND r.deleted_at IS NULL
 ),
 scoped AS (
-    -- data_scope=6 角色指定用户组
+    -- data_scope=6：角色指定的用户组
     SELECT s.data_id AS group_id
     FROM my_roles r
              JOIN public.sys_role_id_scope s ON s.role_id = r.id AND s."type" = 3
@@ -328,7 +325,7 @@ SELECT CASE
        END
 $$;
 
-COMMENT ON FUNCTION public.fn_accessible_group_ids(int8) IS '行级守卫：返回当前用户有权访问的用户组 ID 数组（@scope owner_user_group_id 列的执行体，in_any 三态）。仅 data_scope=6（角色指定组）产生非空集合；NULL=全租户不限(仅 data_scope=7 分支)；{}=拒绝一切。需先 SET app.tenant_id，自动受 RLS 租户隔离';
+COMMENT ON FUNCTION public.fn_accessible_group_ids(int8) IS '权限过滤：返回当前用户能看到哪些用户组（列表查询自动用于 owner_user_group_id 过滤）。只有两种角色返回结果：角色指定了用户组（data_scope=6）和全租户（data_scope=7，NULL 不过滤）；其他情况为 {}（该维度什么都看不到）。需要会话已设置 app.tenant_id。';
 
 
 -- ============================================================
