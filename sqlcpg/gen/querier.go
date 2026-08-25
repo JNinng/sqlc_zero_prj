@@ -12,8 +12,15 @@ type Querier interface {
 	// 写入用户-角色映射（判断通过后调用）。租户自动取当前会话的
 	// app.tenant_id；重复分配不报错、不重写
 	AssignUserRole(ctx context.Context, arg AssignUserRoleParams) error
+	// 批量写入用户-角色映射（CanAssignRoles 全部通过后调用），
+	// 返回实际新增的行数（已拥有的角色跳过、不报错）
+	AssignUserRoles(ctx context.Context, arg AssignUserRolesParams) (int64, error)
 	// 判断当前用户能否把某个角色分配给某个用户（规则见 fn_can_assign_role）
 	CanAssignRole(ctx context.Context, arg CanAssignRoleParams) (bool, error)
+	// 批量版：一次判断多个角色，每个角色一行（role_id, ok），
+	// 全部通过才允许批量写入（规则同 fn_can_assign_role；
+	// 与 fn_can_assign_roles 函数体一致，直接 SQL 调用时用那个函数）
+	CanAssignRoles(ctx context.Context, arg CanAssignRolesParams) ([]CanAssignRolesRow, error)
 	// 判断能否把某条数据的归属改成新归属：两头都要过——这条数据本身
 	// 有权操作，新归属的人/部门/组也在可见范围内（见 fn_can_transfer_owner）
 	CanTransferOwner(ctx context.Context, arg CanTransferOwnerParams) (bool, error)

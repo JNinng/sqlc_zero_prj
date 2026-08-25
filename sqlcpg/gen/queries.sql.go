@@ -28,6 +28,29 @@ func (q *Queries) AssignUserRole(ctx context.Context, arg AssignUserRoleParams) 
 	return err
 }
 
+const assignUserRoles = `-- name: AssignUserRoles :execrows
+INSERT INTO public.sys_user_role_mapping (user_id, role_id, tenant_id, created_by)
+SELECT $1, r, current_setting('app.tenant_id'), $2
+FROM unnest($3::int8[]) AS r
+ON CONFLICT (user_id, role_id) DO NOTHING
+`
+
+type AssignUserRolesParams struct {
+	UserID    int64   `db:"user_id" json:"user_id"`
+	CreatedBy int64   `db:"created_by" json:"created_by"`
+	RoleIds   []int64 `db:"role_ids" json:"role_ids"`
+}
+
+// 批量写入用户-角色映射（CanAssignRoles 全部通过后调用），
+// 返回实际新增的行数（已拥有的角色跳过、不报错）
+func (q *Queries) AssignUserRoles(ctx context.Context, arg AssignUserRolesParams) (int64, error) {
+	result, err := q.db.Exec(ctx, assignUserRoles, arg.UserID, arg.CreatedBy, arg.RoleIds)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const canAssignRole = `-- name: CanAssignRole :one
 SELECT public.fn_can_assign_role($1, $2, $3) AS ok
 `
@@ -44,6 +67,46 @@ func (q *Queries) CanAssignRole(ctx context.Context, arg CanAssignRoleParams) (b
 	var ok bool
 	err := row.Scan(&ok)
 	return ok, err
+}
+
+const canAssignRoles = `-- name: CanAssignRoles :many
+SELECT r::int8 AS role_id,
+       public.fn_can_assign_role($1, r, $2) AS ok
+FROM unnest($3::int8[]) AS r
+`
+
+type CanAssignRolesParams struct {
+	Operator int64   `db:"operator" json:"operator"`
+	Target   int64   `db:"target" json:"target"`
+	RoleIds  []int64 `db:"role_ids" json:"role_ids"`
+}
+
+type CanAssignRolesRow struct {
+	RoleID int64 `db:"role_id" json:"role_id"`
+	Ok     bool  `db:"ok" json:"ok"`
+}
+
+// 批量版：一次判断多个角色，每个角色一行（role_id, ok），
+// 全部通过才允许批量写入（规则同 fn_can_assign_role；
+// 与 fn_can_assign_roles 函数体一致，直接 SQL 调用时用那个函数）
+func (q *Queries) CanAssignRoles(ctx context.Context, arg CanAssignRolesParams) ([]CanAssignRolesRow, error) {
+	rows, err := q.db.Query(ctx, canAssignRoles, arg.Operator, arg.Target, arg.RoleIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CanAssignRolesRow
+	for rows.Next() {
+		var i CanAssignRolesRow
+		if err := rows.Scan(&i.RoleID, &i.Ok); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const canTransferOwner = `-- name: CanTransferOwner :one

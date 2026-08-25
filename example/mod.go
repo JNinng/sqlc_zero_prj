@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -241,6 +242,41 @@ func (RoleAdminAPI) Assign(ctx context.Context, s *Session, roleID, targetUserID
 	}
 	return s.Q().AssignUserRole(ctx, gen.AssignUserRoleParams{
 		UserID: targetUserID, RoleID: roleID, CreatedBy: auth.UserID,
+	})
+}
+
+// AssignRoles 批量把多个角色配给同一个用户：一次查询逐个角色判断，
+// 全部通过才批量写入；任何一个不通过就整批拒绝（一个都不写），
+// 被拒的角色 ID 列在错误里。返回实际新增的条数——用户已经拥有的
+// 角色会跳过，不报错。入参会先去重排序，判断与报错信息都稳定。
+func (RoleAdminAPI) AssignRoles(ctx context.Context, s *Session, roleIDs []int64, targetUserID int64) (int64, error) {
+	auth := s.Auth()
+	if len(roleIDs) == 0 {
+		return 0, fmt.Errorf("AssignRoles: roleIDs 为空")
+	}
+	roles := slices.Clone(roleIDs)
+	slices.Sort(roles)
+	roles = slices.Compact(roles)
+
+	rows, err := s.Q().CanAssignRoles(ctx, gen.CanAssignRolesParams{
+		Operator: auth.UserID, Target: targetUserID, RoleIds: roles,
+	})
+	if err != nil {
+		return 0, err
+	}
+	var denied []int64
+	for _, r := range rows {
+		if !r.Ok {
+			denied = append(denied, r.RoleID)
+		}
+	}
+	if len(denied) > 0 {
+		return 0, &ErrDenied{Resource: "sys_role", Action: "assign", Reason: fmt.Sprintf(
+			"operator=%d 给 user=%d 批量分配被拒：角色 %v 不允许（目标部门不符合角色配置，或你看不见目标用户；规则见 fn_can_assign_role）",
+			auth.UserID, targetUserID, denied)}
+	}
+	return s.Q().AssignUserRoles(ctx, gen.AssignUserRolesParams{
+		UserID: targetUserID, CreatedBy: auth.UserID, RoleIds: roles,
 	})
 }
 

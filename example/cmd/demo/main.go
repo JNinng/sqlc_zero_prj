@@ -1,9 +1,9 @@
 // demo 是数据权限体系的可运行验收入口：重建独立测试库 → 按序应用
 // schema.sql / rls.sql / operate.sql / seed.sql → 以 test_u 普通角色连接
-// 执行 16 个场景：[1]-[12] 验证读（各档数据范围能看到哪些行、多角色
+// 执行 17 个场景：[1]-[12] 验证读（各档数据范围能看到哪些行、多角色
 // 并集、忘注入 Scope 直接报错、漏设租户什么都看不到、加过滤条件只能
-// 看得更少）；[13]-[16] 验证写（分配角色、修改归属前的权限判断）。
-// 任一断言失败即以非零码退出。
+// 看得更少）；[13]-[17] 验证写（分配角色、批量分配多个角色、修改归属
+// 前的权限判断）。任一断言失败即以非零码退出。
 //
 // 运行（在仓库根目录）: go run ./example/cmd/demo
 // 连接:管理库默认 postgres://postgresql:root@localhost:5432/postgres，
@@ -86,12 +86,15 @@ func run() error {
 	d.assignExemptScenario(ctx)
 	d.transferDenyScenario(ctx)
 	d.transferAllowScenario(ctx)
+	// [17] 放最后：批量演示会给 lisi 追加角色 106，改变 lisi 的可见范围，
+	// 不能影响前面的 [15]
+	d.assignBatchScenario(ctx)
 
 	fmt.Println()
 	if d.fails > 0 {
 		return fmt.Errorf("%d 个场景断言失败", d.fails)
 	}
-	fmt.Println("全部 16 个场景通过 ✔")
+	fmt.Println("全部 17 个场景通过 ✔")
 	return nil
 }
 
@@ -105,6 +108,13 @@ func setup(ctx context.Context) error {
 	admin, err := pgx.Connect(ctx, adminDSN)
 	if err != nil {
 		return fmt.Errorf("连接管理库失败(本地 PostgreSQL 不可达?): %w", err)
+	}
+	// 先踢掉还连在测试库上的会话（上次运行残留/IDE 连接），否则 DROP 会被占用阻塞
+	if _, err := admin.Exec(ctx,
+		"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
+		testDBName); err != nil {
+		admin.Close(ctx)
+		return err
 	}
 	if _, err := admin.Exec(ctx, "DROP DATABASE IF EXISTS "+testDBName); err != nil {
 		admin.Close(ctx)
@@ -376,6 +386,52 @@ func (d *demo) assignExemptScenario(ctx context.Context) {
 		var den *example.ErrDenied
 		fmt.Printf("   zhouba 分配 role=102 → user=6(前端组): %v\n", err)
 		d.check(errors.As(err, &den), "目标部门不在角色配置里照样被拒")
+		return nil
+	})
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 执行错误: %v\n", err)
+	}
+}
+
+// assignBatch [17] 批量分配：多个角色一次判断、一次写入；
+// 任一角色不通过则整批拒绝，一个都不写。
+func (d *demo) assignBatchScenario(ctx context.Context) {
+	fmt.Println("== [17] 写入权限：批量分配多个角色 ==")
+	err := example.Begin(ctx, d.pool, d.auth("zhouba"), func(s *example.Session) error {
+		// [102, 103] 给用户 10：102 通过（部门命中配置），
+		// 103 不通过（zhouba 看不见用户 10，103 又没有分发配置）
+		// → 整批拒绝，一个都不写
+		_, err := example.RoleAdminAPI{}.AssignRoles(ctx, s, []int64{102, 103}, userID["market"])
+		var den *example.ErrDenied
+		fmt.Printf("   zhouba 批量分配 [102 103] → user=10:\n      %v\n", err)
+		d.check(errors.As(err, &den), "任一角色不通过，整批拒绝（102 虽通过也不写）")
+		has, err := s.Q().HasUserRole(ctx, gen.HasUserRoleParams{UserID: userID["market"], RoleID: 103})
+		if err != nil {
+			return err
+		}
+		d.check(!has, "被拒的角色没有写入")
+		return nil
+	})
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 执行错误: %v\n", err)
+		return
+	}
+	err = example.Begin(ctx, d.pool, d.auth("admin"), func(s *example.Session) error {
+		// [103, 106] 给 lisi：admin 全可见，两个都通过；
+		// lisi 种子里已有 103 → 跳过，实际新增 1 条
+		inserted, err := example.RoleAdminAPI{}.AssignRoles(ctx, s, []int64{103, 106}, userID["lisi"])
+		fmt.Printf("   admin 批量分配 [103 106] → user=3: 新增 %d 条\n", inserted)
+		d.check(err == nil && inserted == 1, "全部通过批量写入；已拥有的角色（103）跳过，新增 1 条")
+		if err != nil {
+			return nil
+		}
+		has, err := s.Q().HasUserRole(ctx, gen.HasUserRoleParams{UserID: userID["lisi"], RoleID: 106})
+		if err != nil {
+			return err
+		}
+		d.check(has, "新角色 106 已写入")
 		return nil
 	})
 	if err != nil {

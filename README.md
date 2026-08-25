@@ -38,7 +38,7 @@ sqlcpg/                  生成目录（sqlc 工作区）
   gen/                   生成代码（勿手改）
 example/                 独立 Go module（replace => ../），消费方接入范式
   mod.go                 门面：AuthContext → RLS 会话注入 → Scope 注入 → List/Count
-  cmd/demo/main.go       可运行验收：重建测试库 + 全场景断言
+  cmd/demo/main.go       可运行验收：重建测试库 + 17 场景断言
 docs/adr/                架构决策记录（ADR）
 CONTEXT.md               领域术语表
 ```
@@ -57,13 +57,14 @@ go run ./cmd/demo
 `schema.sql → rls.sql → operate.sql → seed.sql`，再以 **test_u 普通角色**连接跑全部验收场景：
 
 - data_scope 1-7 逐档可见性（同一张 basic 表，不同角色视角结果断言）
-- 多角色并集、视角收窄（业务过滤叠加守卫）
+- 多角色并集、加过滤条件只能看得更少
 - fail-closed（未注入 Scope → `Kind=scope` 错误，绝不静默全量）
 - RLS 层独立验证（漏设 `app.tenant_id` → 0 行，即使 Scope 已注入）
-- 守卫资源（SysUser）与无守卫资源（SysDictData）对照
-- 操作权限检测（⑬-⑯）：越权分配拒（数据范围/映射硬条件两个子例，拒绝即无写入）、
-  命中映射豁免放行（目标在数据范围外、仅豁免路径可达）、归属转移双向校验拒
-  （新目标不可达/旧行不可达）、正常转移放行（写后同事务读回确认）
+- 配了 @scope 的表（SysUser）与没配的表（SysDictData）对照
+- 写入前判断（[13]-[17]）：越权分配被拒（目标不可见/目标部门不符合配置，
+  拒绝即无写入）、部门命中角色配置放行、改归属两头校验（新归属人可见、
+  旧行有权操作）、改归属成功（写后同事务读回确认）、批量分配多个角色
+  （一次判断，任一不通过整批拒绝；已拥有的角色跳过）
 
 连接覆盖：`ZERO_DEMO_ADMIN_DSN`（管理库）、`ZERO_DEMO_TEST_DSN`（test_u 连测试库）。
 任一断言失败即非零退出，可直接用作 CI 验收。

@@ -11,8 +11,9 @@
 --   再写入，两步放在同一个事务里，判断不通过就直接报错回滚，
 --   不产生任何写入（example/mod.go 有完整用法）。
 --
--- 三个函数：
+-- 四个函数：
 --   fn_can_assign_role     能否把某个角色分配给某个用户
+--   fn_can_assign_roles    上面第一条的批量版：一次判断多个角色
 --   fn_can_operate_row     能否修改/删除某条数据（按数据的归属判断）
 --   fn_can_transfer_owner  能否把某条数据的归属改给别人
 --
@@ -122,6 +123,35 @@ SELECT EXISTS (SELECT 1 FROM operator)
 $$;
 
 COMMENT ON FUNCTION public.fn_can_assign_role(int8, int8, int8) IS '写入前判断：operator 能否把 role 分配给 target。角色配了分发部门（sys_role_allowed_dept）时，目标用户部门须在映射内，且操作者部门命中映射或能看见目标用户；未配时按 scope_dept_id 子树 + 能看见目标用户判断。操作者/角色/目标任一无效都返回 false。';
+
+
+-- ------------------------------------------------------------
+-- fn_can_assign_roles：批量版分配判断
+-- 一次判断"把多个角色配给同一个用户"，逐个角色给出结论。
+--
+-- 参数：
+--   p_operator_id     发起分配的用户
+--   p_role_ids        要分配的角色列表（int8 数组）
+--   p_target_user_id  被分配的用户
+--
+-- 判断逻辑：对列表里的每个角色独立调用 fn_can_assign_role，
+-- 规则完全相同，角色之间互不影响。
+--
+-- 返回：每个角色一行（role_id, ok）。全部 ok=true 才允许批量写入；
+-- 有任一 false 时调用方应整体报错回滚（不写入任何一个）。
+-- 空数组返回空结果（没有要判断的角色）。
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.fn_can_assign_roles(p_operator_id int8, p_role_ids int8[], p_target_user_id int8)
+    RETURNS TABLE(role_id int8, ok boolean)
+    STABLE
+    LANGUAGE sql
+AS $$
+SELECT r AS role_id,
+       public.fn_can_assign_role(p_operator_id, r, p_target_user_id) AS ok
+FROM unnest(p_role_ids) AS r
+$$;
+
+COMMENT ON FUNCTION public.fn_can_assign_roles(int8, int8[], int8) IS '写入前判断（批量）：逐个角色调用 fn_can_assign_role，返回每个角色的 (role_id, ok)。全部通过才批量写入；任一不通过整体回滚。';
 
 
 -- ------------------------------------------------------------

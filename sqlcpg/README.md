@@ -12,7 +12,7 @@ FUNCTION`、本文件的索引表。
 |---|---|---|---|---|
 | 1 | schema.sql | 建表，表注释里带 @dynamic/@scope 指令；部门闭包触发器 | 是 | 22 张表、1 个触发器函数 |
 | 2 | rls.sql | 租户隔离 RLS 策略；三个权限过滤函数；updated_at 触发器；test_u 授权 | 否 | 21 条策略、4 个函数 |
-| 3 | operate.sql | 写数据前的权限判断函数 | 是（只读函数签名） | 3 个判断函数 |
+| 3 | operate.sql | 写数据前的权限判断函数 | 是（只读函数签名） | 4 个判断函数 |
 | 4 | seed.sql | 种子数据（含权限演示数据） | 否 | 租户/部门/角色/用户/用户组/字典 + basic 演示数据 |
 
 - sqlc.yaml 的 schema 列表是 `[schema.sql, operate.sql]`：把 operate.sql
@@ -51,6 +51,7 @@ INVOKER（以调用者身份执行，受 RLS 约束）。除触发器函数外�
 | 函数 | 签名 | 属性 | 判断什么 |
 |---|---|---|---|
 | fn_can_assign_role | (操作者, 角色, 目标用户) → boolean | S | 能否把角色分配给用户。角色配了分发部门时：目标部门须在配置内，且操作者部门命中配置、或能看见目标用户；没配时按 scope_dept_id 子树 + 能看见目标用户判断 |
+| fn_can_assign_roles | (操作者, 角色数组, 目标用户) → (role_id, ok) 行集 | S | 上面那条的批量版：对数组里每个角色独立判断，逐个返回结论；全部通过才批量写入 |
 | fn_can_operate_row | (用户, 归属人, 归属部门, 归属组) → boolean | S | 能否修改/删除一条数据。能看见就能操作：有全租户角色直接通过；否则任一归属命中可见范围即通过；三个归属全空的数据只有全租户能操作 |
 | fn_can_transfer_owner | (用户, 旧归属×3, 新归属×3) → boolean | S | 能否修改数据的归属。两头都要过：这条数据本身有权操作，且新归属的人/部门/组在可见范围内（防止把数据转给自己看不见的人） |
 
@@ -67,9 +68,11 @@ INVOKER（以调用者身份执行，受 RLS 约束）。除触发器函数外�
 |---|---|---|---|
 | GetUser | :one | id → SysUser | 按主键查用户（RLS 生效，别的租户查不到） |
 | CanAssignRole | :one | 操作者/角色/目标 → bool | 分配前的权限判断 |
+| CanAssignRoles | :many | 操作者/角色列表/目标 → (role_id, ok) 行 | 批量分配前的权限判断（逐个角色） |
 | CanTransferOwner | :one | 操作者 + 旧/新归属（可空）→ bool | 改归属前的权限判断 |
 | GetBasicForUpdate | :one | id → Basic | 锁行并读出当前归属（FOR UPDATE） |
-| AssignUserRole | :exec | 用户/角色/操作者 | 写入角色映射，租户自动取会话值，重复分配不报错 |
+| AssignUserRole | :exec | 用户/角色/操作者 | 写入一条角色映射，租户自动取会话值，重复分配不报错 |
+| AssignUserRoles | :execrows | 用户/角色列表/操作者 → 新增条数 | 批量写入角色映射，已拥有的跳过 |
 | UpdateBasicOwner | :exec | 新归属（可空）+ 操作者 + id | 修改归属，updated_at 自动刷新 |
 | HasUserRole | :one | 用户/角色 → bool | 确认分配结果是否落库 |
 
