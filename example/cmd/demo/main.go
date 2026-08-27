@@ -1,9 +1,11 @@
 // demo 是数据权限体系的可运行验收入口：重建独立测试库 → 按序应用
-// schema.sql / rls.sql / operate.sql / seed.sql → 以 test_u 普通角色连接
-// 执行 17 个场景：[1]-[12] 验证读（各档数据范围能看到哪些行、多角色
-// 并集、忘注入 Scope 直接报错、漏设租户什么都看不到、加过滤条件只能
-// 看得更少）；[13]-[17] 验证写（分配角色、批量分配多个角色、修改归属
-// 前的权限判断）。任一断言失败即以非零码退出。
+// schema.sql / rls.sql / operate.sql / expose.sql / seed.sql → 以 test_u
+// 普通角色连接执行 23 个场景：[1]-[12] 验证读（各档数据范围能看到哪些
+// 行、多角色并集、忘注入 Scope 直接报错、漏设租户什么都看不到、加
+// 过滤条件只能看得更少）；[13]-[17] 验证写（分配角色、批量分配多个
+// 角色、修改归属前的权限判断）；[18]-[23] 验证权限查询接口（单点
+// 判断与维度选择、批量过滤、功能权限码、可视范围三态、用户字段
+// 投影、范围版本缓存失效）。任一断言失败即以非零码退出。
 //
 // 运行（在仓库根目录）: go run ./example/cmd/demo
 // 连接:管理库默认 postgres://postgresql:root@localhost:5432/postgres，
@@ -26,6 +28,7 @@ import (
 	"github.com/jninng/sqlc_gen_dynamic/dynq"
 
 	"example"
+	"sqlc_zero_prj/perm"
 	gen "sqlc_zero_prj/sqlcpg/gen"
 )
 
@@ -65,7 +68,7 @@ func run() error {
 	defer pool.Close()
 
 	fmt.Println("== 环境 ==")
-	fmt.Printf("   测试库 %s 已重建（schema.sql → rls.sql → operate.sql → seed.sql）\n", testDBName)
+	fmt.Printf("   测试库 %s 已重建（schema.sql → rls.sql → operate.sql → expose.sql → seed.sql）\n", testDBName)
 	fmt.Println("   场景连接: test_u 普通角色（真实承受 RLS/FORCE，非超级用户）")
 	fmt.Println()
 
@@ -86,15 +89,25 @@ func run() error {
 	d.assignExemptScenario(ctx)
 	d.transferDenyScenario(ctx)
 	d.transferAllowScenario(ctx)
-	// [17] 放最后：批量演示会给 lisi 追加角色 106，改变 lisi 的可见范围，
+	// [17] 放在写场景最后：批量演示会给 lisi 追加角色 106，改变 lisi 的可见范围，
 	// 不能影响前面的 [15]
 	d.assignBatchScenario(ctx)
+	// [18]-[23] 权限查询接口（perm 服务层）：注意 [17] 已给 lisi 加了
+	// 角色 106（指定人 lisi/wangwu），lisi 的可见用户是 {3,4}，
+	// 后续断言都按这个状态写
+	d.checkVisibleScenario(ctx)
+	d.filterVisibleScenario(ctx)
+	d.permissionCodeScenario(ctx)
+	d.scopeStateScenario(ctx)
+	d.listVisibleUsersScenario(ctx)
+	// [23] 放最后：给 lisi 追加角色 104 会再改变 lisi 的可见范围
+	d.versionBumpScenario(ctx)
 
 	fmt.Println()
 	if d.fails > 0 {
 		return fmt.Errorf("%d 个场景断言失败", d.fails)
 	}
-	fmt.Println("全部 17 个场景通过 ✔")
+	fmt.Println("全部 23 个场景通过 ✔")
 	return nil
 }
 
@@ -137,7 +150,7 @@ func setup(ctx context.Context) error {
 	defer db.Close(ctx)
 
 	dir := filepath.Join(repoRoot(), "sqlcpg")
-	for _, f := range []string{"schema.sql", "rls.sql", "operate.sql", "seed.sql"} {
+	for _, f := range []string{"schema.sql", "rls.sql", "operate.sql", "expose.sql", "seed.sql"} {
 		b, err := os.ReadFile(filepath.Join(dir, f))
 		if err != nil {
 			return fmt.Errorf("read %s: %w", f, err)
@@ -519,6 +532,243 @@ func deref(p *int64) any {
 	return *p
 }
 
+// ------------------------------------------------------------
+// [18]-[23] 权限查询接口：perm 服务层的本地调用演示（外部进程
+// 经 HTTP/gRPC 调用的就是这些方法；传输外壳由宿主自包）。
+// 前置状态注意：[17] 已给 lisi(3) 追加角色 106（指定人 3/4），
+// lisi 可见用户 {3,4}、可见部门 {3}（103 仅本人也含自己部门）。
+// ------------------------------------------------------------
+
+func int64Ptr(v int64) *int64 { return &v }
+
+// checkVisibleScenario [18] 单点判断 + 维度选择：同一条归属，
+// 换维度掩码结论不同；无效掩码 fail-closed。
+func (d *demo) checkVisibleScenario(ctx context.Context) {
+	fmt.Println("== [18] 权限查询：单点判断 + 维度选择（lisi） ==")
+	svc := perm.New(d.pool)
+	cases := []struct {
+		dims    perm.Dims
+		target  perm.OwnerTriplet
+		want    bool
+		comment string
+	}{
+		{perm.DimAll, perm.OwnerTriplet{UserID: int64Ptr(3)}, true, "全维度：归属人=自己，可见"},
+		{perm.DimAll, perm.OwnerTriplet{DeptID: int64Ptr(2)}, false, "全维度：归属部门=2 不在可见部门 {3} 内"},
+		{perm.DimDept, perm.OwnerTriplet{DeptID: int64Ptr(3)}, true, "仅部门维度：归属部门=自己所在部门，可见"},
+		{perm.DimUser, perm.OwnerTriplet{DeptID: int64Ptr(3)}, false, "仅归属人维度：目标没有归属人，部门不参与判定"},
+		{perm.Dims(0), perm.OwnerTriplet{UserID: int64Ptr(3)}, false, "无效掩码 0：没有选中任何维度，fail-closed"},
+	}
+	for _, c := range cases {
+		ok, err := svc.CheckVisible(ctx, d.pauth("lisi"), c.dims, c.target)
+		if err != nil {
+			d.fails++
+			fmt.Printf("   FAIL 执行错误: %v\n", err)
+			continue
+		}
+		fmt.Printf("   dims=%d target(u=%v,d=%v,g=%v) → %v\n",
+			c.dims, deref(c.target.UserID), deref(c.target.DeptID), deref(c.target.GroupID), ok)
+		d.check(ok == c.want, c.comment)
+	}
+}
+
+// filterVisibleScenario [19] 批量过滤：外部系统一次传一组归属三元组，
+// 只回可见子集（保持顺序）；FilterVisibleRows 的远程优化用法。
+func (d *demo) filterVisibleScenario(ctx context.Context) {
+	fmt.Println("== [19] 权限查询：批量过滤返回可见子集（wujiu·指定人 {3,4}） ==")
+	svc := perm.New(d.pool)
+	targets := []perm.OwnerTriplet{
+		{UserID: int64Ptr(3)},  // 可见
+		{UserID: int64Ptr(9)},  // 看不见的人
+		{DeptID: int64Ptr(2)},  // 指定人档位看不见任何部门
+		{UserID: int64Ptr(4)},  // 可见
+		{},                     // 无归属：非全租户角色不可见
+		{GroupID: int64Ptr(1)}, // 指定人档位看不见任何组
+	}
+	visible, err := svc.FilterVisibleRows(ctx, d.pauth("wujiu"), perm.DimAll, targets)
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 执行错误: %v\n", err)
+		return
+	}
+	var got []any
+	for _, t := range visible {
+		got = append(got, fmt.Sprintf("(u=%v,d=%v,g=%v)", deref(t.UserID), deref(t.DeptID), deref(t.GroupID)))
+	}
+	fmt.Printf("   6 条 → 可见 %d 条: %v\n", len(visible), got)
+	d.check(len(visible) == 2 &&
+		visible[0].UserID != nil && *visible[0].UserID == 3 &&
+		visible[1].UserID != nil && *visible[1].UserID == 4,
+		"期望可见子集 [(u=3), (u=4)]（保持传入顺序，只回允许部分）")
+
+	// 维度收窄到仅部门：同样 6 条全不可见（指定人档位部门集合为空）
+	visible, err = svc.FilterVisibleRows(ctx, d.pauth("wujiu"), perm.DimDept, targets)
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 执行错误: %v\n", err)
+		return
+	}
+	fmt.Printf("   dims=DimDept 时可见 %d 条\n", len(visible))
+	d.check(len(visible) == 0, "仅部门维度：指定人档位没有部门可见性，全拒")
+}
+
+// permissionCodeScenario [20] 功能权限轴：HasPermission 单码判断 +
+// GetPermissionCodes 全量枚举（lisi: 角色 103，106 无菜单）。
+func (d *demo) permissionCodeScenario(ctx context.Context) {
+	fmt.Println("== [20] 权限查询：功能权限码（lisi vs admin） ==")
+	svc := perm.New(d.pool)
+	for _, c := range []struct {
+		user string
+		code string
+		want bool
+	}{
+		{"lisi", "sys:user:query", true},
+		{"lisi", "sys:user:create", false},
+		{"admin", "sys:user:create", true},
+	} {
+		ok, err := svc.HasPermission(ctx, d.pauth(c.user), c.code)
+		if err != nil {
+			d.fails++
+			fmt.Printf("   FAIL 执行错误: %v\n", err)
+			continue
+		}
+		fmt.Printf("   %-8s has %q → %v\n", c.user, c.code, ok)
+		d.check(ok == c.want, fmt.Sprintf("%s 持有 %q 应为 %v（角色→菜单→权限码）", c.user, c.code, c.want))
+	}
+	codes, err := svc.GetPermissionCodes(ctx, d.pauth("lisi"))
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 执行错误: %v\n", err)
+		return
+	}
+	fmt.Printf("   lisi 全部权限码: %v\n", codes)
+	d.check(slices.Equal(codes, []string{"sys:dept", "sys:dept:query", "sys:manage", "sys:user", "sys:user:query"}),
+		"lisi 权限码 = 角色 103 的菜单（201/202/203/236/237），去重排序")
+}
+
+// scopeStateScenario [21] 可视范围三态：All（全租户）/ 数组 / 空数组。
+func (d *demo) scopeStateScenario(ctx context.Context) {
+	fmt.Println("== [21] 权限查询：可视范围三态（admin / lisi / zhengshi） ==")
+	svc := perm.New(d.pool)
+	type want struct {
+		user                 string
+		all                  bool
+		users, depts, groups []int64
+	}
+	for _, w := range []want{
+		{"admin", true, nil, nil, nil},
+		// lisi = 103 仅本人（自己 + 所在部门 3）∪ 106 指定人 3/4
+		// （指定人档位的部门集合含目标用户归属部门，见 fn_accessible_dept_ids）
+		{"lisi", false, []int64{3, 4}, []int64{3, 4}, []int64{}},
+		{"zhengshi", false, []int64{10}, []int64{5}, []int64{}},
+	} {
+		sc, err := svc.GetScope(ctx, d.pauth(w.user))
+		if err != nil {
+			d.fails++
+			fmt.Printf("   FAIL 执行错误: %v\n", err)
+			continue
+		}
+		fmt.Printf("   %-9s users=%v depts=%v groups=%v\n", w.user,
+			scopeRepr(sc.Users), scopeRepr(sc.Depts), scopeRepr(sc.Groups))
+		d.checkScopeSet(w.user+" users", sc.Users, w.all, w.users)
+		d.checkScopeSet(w.user+" depts", sc.Depts, w.all, w.depts)
+		d.checkScopeSet(w.user+" groups", sc.Groups, w.all, w.groups)
+	}
+}
+
+func scopeRepr(s perm.ScopeSet) string {
+	if s.All {
+		return "All(全租户)"
+	}
+	return fmt.Sprintf("%v", s.IDs)
+}
+
+func (d *demo) checkScopeSet(label string, got perm.ScopeSet, all bool, want []int64) {
+	if all {
+		d.check(got.All && got.IDs == nil,
+			fmt.Sprintf("%s: 期望 All=true 且不展开全量 ID，实得 %s", label, scopeRepr(got)))
+		return
+	}
+	gotIDs := slices.Clone(got.IDs)
+	slices.Sort(gotIDs)
+	wantIDs := slices.Clone(want)
+	slices.Sort(wantIDs)
+	d.check(!got.All && slices.Equal(gotIDs, wantIDs),
+		fmt.Sprintf("%s: 期望 %v（All=false），实得 %s", label, want, scopeRepr(got)))
+}
+
+// listVisibleUsersScenario [22] 用户字段投影：可见范围内按指定字段拉
+// 用户（呼叫中心扩展字段场景的模板用法；敏感列被 @hidden 挡住）。
+func (d *demo) listVisibleUsersScenario(ctx context.Context) {
+	fmt.Println("== [22] 权限查询：可见用户 + 字段投影（zhouba） ==")
+	svc := perm.New(d.pool)
+	res, err := svc.ListVisibleUsers(ctx, d.pauth("zhouba"), []string{"id", "nickname"}, 20, nil)
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 执行错误: %v\n", err)
+		return
+	}
+	var ids []int64
+	for _, u := range res.Items {
+		ids = append(ids, u.ID)
+	}
+	slices.Sort(ids) // 动态列表默认 id 倒序，断言按集合比较
+	fmt.Printf("   可见用户(id,nickname): ")
+	for _, u := range res.Items {
+		fmt.Printf("%d:%s ", u.ID, u.Nickname)
+	}
+	fmt.Println()
+	d.check(slices.Equal(ids, []int64{2, 6, 7}), "期望 [2 6 7]（技术部子树 {2,7,8} 内用户）")
+	d.check(len(res.Items) > 0 && res.Items[0].Nickname != "" && res.Items[0].Password == "",
+		"指定字段已投影、未选字段为零值（password 不可选，@hidden）")
+}
+
+// versionBumpScenario [23] 范围版本：给 lisi 追加角色只 bump lisi 的
+// 用户级版本，租户级与他人版本不动（ADR-0008 双粒度隔离）。
+func (d *demo) versionBumpScenario(ctx context.Context) {
+	fmt.Println("== [23] 权限查询：范围版本失效信号（双粒度隔离） ==")
+	svc := perm.New(d.pool)
+	before, err := svc.GetScopeVersion(ctx, d.pauth("lisi"))
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 执行错误: %v\n", err)
+		return
+	}
+	otherBefore, err := svc.GetScopeVersion(ctx, d.pauth("wangwu"))
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 执行错误: %v\n", err)
+		return
+	}
+	fmt.Printf("   版本 before: lisi=(租户%d,用户%d) wangwu=(租户%d,用户%d)\n",
+		before.Tenant, before.User, otherBefore.Tenant, otherBefore.User)
+
+	// admin 给 lisi 追加角色 104：真实写入触发 bump
+	err = example.Begin(ctx, d.pool, d.auth("admin"), func(s *example.Session) error {
+		return example.RoleAdminAPI{}.Assign(ctx, s, 104, userID["lisi"])
+	})
+	fmt.Printf("   admin 分配 role=104 → lisi: err=%v\n", err)
+	d.check(err == nil, "追加角色写入成功（触发器随后 bump 版本）")
+
+	after, err := svc.GetScopeVersion(ctx, d.pauth("lisi"))
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 执行错误: %v\n", err)
+		return
+	}
+	otherAfter, err := svc.GetScopeVersion(ctx, d.pauth("wangwu"))
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 执行错误: %v\n", err)
+		return
+	}
+	fmt.Printf("   版本 after:  lisi=(租户%d,用户%d) wangwu=(租户%d,用户%d)\n",
+		after.Tenant, after.User, otherAfter.Tenant, otherAfter.User)
+	d.check(after.User > before.User, "lisi 用户级版本递增（缓存应重拉）")
+	d.check(after.Tenant == before.Tenant, "租户级版本不动（角色映射变更不风暴全租户）")
+	d.check(otherAfter.User == otherBefore.User && otherAfter.Tenant == otherBefore.Tenant,
+		"wangwu 两个版本都不动（一人变更只失效该用户缓存）")
+}
+
 type demo struct {
 	pool  *pgxpool.Pool
 	fails int
@@ -526,6 +776,12 @@ type demo struct {
 
 func (d *demo) auth(user string) example.AuthContext {
 	return example.AuthContext{TenantID: tenantSuper, UserID: userID[user]}
+}
+
+// pauth 返回权限查询接口的身份（与 example.AuthContext 同构，
+// 分属两个包，显式转换）。
+func (d *demo) pauth(user string) perm.AuthContext {
+	return perm.AuthContext{TenantID: tenantSuper, UserID: userID[user]}
 }
 
 func (d *demo) check(ok bool, detail string) {

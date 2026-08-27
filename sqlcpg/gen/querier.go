@@ -29,9 +29,31 @@ type Querier interface {
 	// 判断能否把某条数据的归属改成新归属：两头都要过——这条数据本身
 	// 有权操作，新归属的人/部门/组也在可见范围内（见 fn_can_transfer_owner）
 	CanTransferOwner(ctx context.Context, arg CanTransferOwnerParams) (bool, error)
+	// ============================================================
+	// 权限查询接口（expose.sql 的函数 + 现有三件套），供 perm/ 服务层
+	// 调用：单点判断、批量过滤、功能权限码、可视范围、角色/权限码
+	// 枚举、范围版本。全部只读；拒绝以 false/空集表达，不是错误。
+	// ============================================================
+	// 按指定维度判断一条归属是否可见/可操作（读写同权）。
+	// dims 用 perm.Dims 位组合：1 归属人、2 归属部门、4 归属用户组。
+	// 归属参数传 NULL 表示"没有这个归属"（规则见 fn_check_visible）
+	CheckVisible(ctx context.Context, arg CheckVisibleParams) (bool, error)
 	// 按 id 锁定并读取一行 basic（FOR UPDATE）：改归属前先拿到它
 	// 现在的归属值，防止并发修改后按旧值判断
 	GetBasicForUpdate(ctx context.Context, id int64) (Basic, error)
+	// 枚举用户的全部权限码（去重；前端菜单渲染、网关/远程系统缓存）
+	GetPermissionCodes(ctx context.Context, userID int64) ([]string, error)
+	// 一次取回三个维度的可见集合（三件套一条 SQL 同返，省往返）。
+	// 三态契约：列 NULL = 全租户不过滤（perm 层翻成 All=true），
+	// 空数组 = 什么都看不见，数组 = 可见集合并集
+	GetScope(ctx context.Context, operator int64) (GetScopeRow, error)
+	// 取范围版本（缓存失效信号，ADR-0008）：租户级 + 用户级一次取回，
+	// 缓存有效性 = 两个版本都未变。行不存在时返回 0；RLS 已限本租户
+	GetScopeVersion(ctx context.Context, userID int64) (GetScopeVersionRow, error)
+	// 枚举用户的全部有效角色（展示/审计/外部缓存角色变更）
+	GetUserRoles(ctx context.Context, userID int64) ([]SysRole, error)
+	// 判断用户是否持有某功能权限码（角色→菜单→权限码，与数据范围正交）
+	HasPermission(ctx context.Context, arg HasPermissionParams) (bool, error)
 	// 查某个用户是否已拥有某个角色（分配后的结果确认）
 	HasUserRole(ctx context.Context, arg HasUserRoleParams) (bool, error)
 	// 修改一行 basic 的归属（判断通过后调用）。归属参数传 NULL 表示

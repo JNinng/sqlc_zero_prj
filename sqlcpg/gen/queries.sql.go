@@ -148,6 +148,41 @@ func (q *Queries) CanTransferOwner(ctx context.Context, arg CanTransferOwnerPara
 	return ok, err
 }
 
+const checkVisible = `-- name: CheckVisible :one
+
+SELECT public.fn_check_visible($1, $2,
+                               $3, $4, $5) AS ok
+`
+
+type CheckVisibleParams struct {
+	Operator   int64  `db:"operator" json:"operator"`
+	Dims       int16  `db:"dims" json:"dims"`
+	OwnerUser  *int64 `db:"owner_user" json:"owner_user"`
+	OwnerDept  *int64 `db:"owner_dept" json:"owner_dept"`
+	OwnerGroup *int64 `db:"owner_group" json:"owner_group"`
+}
+
+// ============================================================
+// 权限查询接口（expose.sql 的函数 + 现有三件套），供 perm/ 服务层
+// 调用：单点判断、批量过滤、功能权限码、可视范围、角色/权限码
+// 枚举、范围版本。全部只读；拒绝以 false/空集表达，不是错误。
+// ============================================================
+// 按指定维度判断一条归属是否可见/可操作（读写同权）。
+// dims 用 perm.Dims 位组合：1 归属人、2 归属部门、4 归属用户组。
+// 归属参数传 NULL 表示"没有这个归属"（规则见 fn_check_visible）
+func (q *Queries) CheckVisible(ctx context.Context, arg CheckVisibleParams) (bool, error) {
+	row := q.db.QueryRow(ctx, checkVisible,
+		arg.Operator,
+		arg.Dims,
+		arg.OwnerUser,
+		arg.OwnerDept,
+		arg.OwnerGroup,
+	)
+	var ok bool
+	err := row.Scan(&ok)
+	return ok, err
+}
+
 const getBasicForUpdate = `-- name: GetBasicForUpdate :one
 SELECT id, status, created_by, created_at, updated_by, updated_at, deleted_at, tenant_id, owner_user_id, owner_dept_id, owner_user_group_id
 FROM public.basic
@@ -174,6 +209,148 @@ func (q *Queries) GetBasicForUpdate(ctx context.Context, id int64) (Basic, error
 		&i.OwnerUserGroupID,
 	)
 	return i, err
+}
+
+const getPermissionCodes = `-- name: GetPermissionCodes :many
+SELECT DISTINCT mu.permission_code
+FROM public.sys_user u
+         JOIN public.sys_user_role_mapping m ON m.user_id = u.id
+         JOIN public.sys_role r ON r.id = m.role_id
+    AND r.status = 1 AND r.deleted_at IS NULL
+         JOIN public.sys_role_menu rm ON rm.role_id = r.id
+         JOIN public.sys_menu mu ON mu.id = rm.menu_id
+    AND mu.status = 1 AND mu.deleted_at IS NULL
+WHERE u.id = $1
+ORDER BY mu.permission_code
+`
+
+// 枚举用户的全部权限码（去重；前端菜单渲染、网关/远程系统缓存）
+func (q *Queries) GetPermissionCodes(ctx context.Context, userID int64) ([]string, error) {
+	rows, err := q.db.Query(ctx, getPermissionCodes, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var permission_code string
+		if err := rows.Scan(&permission_code); err != nil {
+			return nil, err
+		}
+		items = append(items, permission_code)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getScope = `-- name: GetScope :one
+SELECT public.fn_accessible_user_ids($1)::int8[] AS user_ids,
+       public.fn_accessible_dept_ids($1)::int8[] AS dept_ids,
+       public.fn_accessible_group_ids($1)::int8[] AS group_ids
+`
+
+type GetScopeRow struct {
+	UserIds  []int64 `db:"user_ids" json:"user_ids"`
+	DeptIds  []int64 `db:"dept_ids" json:"dept_ids"`
+	GroupIds []int64 `db:"group_ids" json:"group_ids"`
+}
+
+// 一次取回三个维度的可见集合（三件套一条 SQL 同返，省往返）。
+// 三态契约：列 NULL = 全租户不过滤（perm 层翻成 All=true），
+// 空数组 = 什么都看不见，数组 = 可见集合并集
+func (q *Queries) GetScope(ctx context.Context, operator int64) (GetScopeRow, error) {
+	row := q.db.QueryRow(ctx, getScope, operator)
+	var i GetScopeRow
+	err := row.Scan(&i.UserIds, &i.DeptIds, &i.GroupIds)
+	return i, err
+}
+
+const getScopeVersion = `-- name: GetScopeVersion :one
+SELECT COALESCE((SELECT v.version
+                 FROM public.sys_perm_version v
+                 WHERE v.user_id = 0), 0)::int8 AS tenant_version,
+       COALESCE((SELECT v.version
+                 FROM public.sys_perm_version v
+                 WHERE v.user_id = $1), 0)::int8 AS user_version
+`
+
+type GetScopeVersionRow struct {
+	TenantVersion int64 `db:"tenant_version" json:"tenant_version"`
+	UserVersion   int64 `db:"user_version" json:"user_version"`
+}
+
+// 取范围版本（缓存失效信号，ADR-0008）：租户级 + 用户级一次取回，
+// 缓存有效性 = 两个版本都未变。行不存在时返回 0；RLS 已限本租户
+func (q *Queries) GetScopeVersion(ctx context.Context, userID int64) (GetScopeVersionRow, error) {
+	row := q.db.QueryRow(ctx, getScopeVersion, userID)
+	var i GetScopeVersionRow
+	err := row.Scan(&i.TenantVersion, &i.UserVersion)
+	return i, err
+}
+
+const getUserRoles = `-- name: GetUserRoles :many
+SELECT r.id, r.status, r.name, r.code, r.role_type, r.data_scope, r.scope_dept_id, r.remark, r.created_by, r.created_at, r.updated_by, r.updated_at, r.deleted_at, r.tenant_id
+FROM public.sys_role r
+         JOIN public.sys_user_role_mapping m ON m.role_id = r.id
+WHERE m.user_id = $1
+  AND r.status = 1
+  AND r.deleted_at IS NULL
+ORDER BY r.id
+`
+
+// 枚举用户的全部有效角色（展示/审计/外部缓存角色变更）
+func (q *Queries) GetUserRoles(ctx context.Context, userID int64) ([]SysRole, error) {
+	rows, err := q.db.Query(ctx, getUserRoles, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SysRole
+	for rows.Next() {
+		var i SysRole
+		if err := rows.Scan(
+			&i.ID,
+			&i.Status,
+			&i.Name,
+			&i.Code,
+			&i.RoleType,
+			&i.DataScope,
+			&i.ScopeDeptID,
+			&i.Remark,
+			&i.CreatedBy,
+			&i.CreatedAt,
+			&i.UpdatedBy,
+			&i.UpdatedAt,
+			&i.DeletedAt,
+			&i.TenantID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const hasPermission = `-- name: HasPermission :one
+SELECT public.fn_has_permission($1, $2) AS ok
+`
+
+type HasPermissionParams struct {
+	Operator int64  `db:"operator" json:"operator"`
+	Code     string `db:"code" json:"code"`
+}
+
+// 判断用户是否持有某功能权限码（角色→菜单→权限码，与数据范围正交）
+func (q *Queries) HasPermission(ctx context.Context, arg HasPermissionParams) (bool, error) {
+	row := q.db.QueryRow(ctx, hasPermission, arg.Operator, arg.Code)
+	var ok bool
+	err := row.Scan(&ok)
+	return ok, err
 }
 
 const hasUserRole = `-- name: HasUserRole :one

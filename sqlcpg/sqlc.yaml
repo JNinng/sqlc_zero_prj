@@ -10,7 +10,9 @@ sql:
   - engine: "postgresql"
     schema:
       - "schema.sql"
+      - "rls.sql"
       - "operate.sql"
+      - "expose.sql"
     queries: "queries.sql"
     gen:
       go:
@@ -25,7 +27,9 @@ sql:
   - engine: "postgresql"
     schema:
       - "schema.sql"
+      - "rls.sql"
       - "operate.sql"
+      - "expose.sql"
     queries: "queries.sql"
     codegen:
       - plugin: "sqlc_gen_dynamic"
