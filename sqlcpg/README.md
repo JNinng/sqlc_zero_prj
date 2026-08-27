@@ -66,7 +66,6 @@ INVOKER（以调用者身份执行，受 RLS 约束）。除触发器函数外�
 
 | 查询 | 类型 | 参数 → 返回 | 干什么 |
 |---|---|---|---|
-| GetUser | :one | id → SysUser | 按主键查用户（RLS 生效，别的租户查不到） |
 | CanAssignRole | :one | 操作者/角色/目标 → bool | 分配前的权限判断 |
 | CanAssignRoles | :many | 操作者/角色列表/目标 → (role_id, ok) 行 | 批量分配前的权限判断（逐个角色） |
 | CanTransferOwner | :one | 操作者 + 旧/新归属（可空）→ bool | 改归属前的权限判断 |

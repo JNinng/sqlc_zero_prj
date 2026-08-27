@@ -4,10 +4,6 @@
 -- 每条查询上方的注释会被 sqlc 带进生成的 Go 代码（godoc），
 -- 修改时记得同步。
 
--- 按主键查一个用户（RLS 生效：别的租户里查不到）
--- name: GetUser :one
-SELECT * FROM sys_user WHERE id = $1;
-
 -- 判断当前用户能否把某个角色分配给某个用户（规则见 fn_can_assign_role）
 -- name: CanAssignRole :one
 SELECT public.fn_can_assign_role(sqlc.arg('operator'), sqlc.arg('role'), sqlc.arg('target')) AS ok;

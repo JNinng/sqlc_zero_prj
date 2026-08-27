@@ -41,7 +41,7 @@ type Session struct {
 	q    *gen.Queries
 }
 
-// Q 返回绑定本事务的 sqlc 查询集。命名查询（GetUser、权限判断、写入）
+// Q 返回绑定本事务的 sqlc 查询集。命名查询（权限判断、写入等）
 // 都是 *Queries 上的方法，要先 New(db) 再调用——注意和动态查询不同，
 // 动态查询（ParseXxx/ListXxx）是顶层函数，db 作为参数显式传入。
 func (s *Session) Q() *gen.Queries {

@@ -52,6 +52,7 @@ func (q *Queries) AssignUserRoles(ctx context.Context, arg AssignUserRolesParams
 }
 
 const canAssignRole = `-- name: CanAssignRole :one
+
 SELECT public.fn_can_assign_role($1, $2, $3) AS ok
 `
 
@@ -61,6 +62,11 @@ type CanAssignRoleParams struct {
 	Target   int64 `db:"target" json:"target"`
 }
 
+// 命名查询：读、写、权限判断都走 sqlc 类型层。
+// 归属类参数用 sqlc.narg（生成 *int64 可空指针），NULL 原样传给
+// 判断函数，表示"没有这个归属"，不做零值转换。
+// 每条查询上方的注释会被 sqlc 带进生成的 Go 代码（godoc），
+// 修改时记得同步。
 // 判断当前用户能否把某个角色分配给某个用户（规则见 fn_can_assign_role）
 func (q *Queries) CanAssignRole(ctx context.Context, arg CanAssignRoleParams) (bool, error) {
 	row := q.db.QueryRow(ctx, canAssignRole, arg.Operator, arg.Role, arg.Target)
@@ -157,46 +163,6 @@ func (q *Queries) GetBasicForUpdate(ctx context.Context, id int64) (Basic, error
 	err := row.Scan(
 		&i.ID,
 		&i.Status,
-		&i.CreatedBy,
-		&i.CreatedAt,
-		&i.UpdatedBy,
-		&i.UpdatedAt,
-		&i.DeletedAt,
-		&i.TenantID,
-		&i.OwnerUserID,
-		&i.OwnerDeptID,
-		&i.OwnerUserGroupID,
-	)
-	return i, err
-}
-
-const getUser = `-- name: GetUser :one
-
-SELECT id, status, name, nickname, password, email, phone, remark, locale, last_login_at, failed_count, locked_until, created_by, created_at, updated_by, updated_at, deleted_at, tenant_id, owner_user_id, owner_dept_id, owner_user_group_id FROM sys_user WHERE id = $1
-`
-
-// 命名查询：读、写、权限判断都走 sqlc 类型层。
-// 归属类参数用 sqlc.narg（生成 *int64 可空指针），NULL 原样传给
-// 判断函数，表示"没有这个归属"，不做零值转换。
-// 每条查询上方的注释会被 sqlc 带进生成的 Go 代码（godoc），
-// 修改时记得同步。
-// 按主键查一个用户（RLS 生效：别的租户里查不到）
-func (q *Queries) GetUser(ctx context.Context, id int64) (SysUser, error) {
-	row := q.db.QueryRow(ctx, getUser, id)
-	var i SysUser
-	err := row.Scan(
-		&i.ID,
-		&i.Status,
-		&i.Name,
-		&i.Nickname,
-		&i.Password,
-		&i.Email,
-		&i.Phone,
-		&i.Remark,
-		&i.Locale,
-		&i.LastLoginAt,
-		&i.FailedCount,
-		&i.LockedUntil,
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.UpdatedBy,

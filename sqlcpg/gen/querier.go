@@ -15,6 +15,11 @@ type Querier interface {
 	// 批量写入用户-角色映射（CanAssignRoles 全部通过后调用），
 	// 返回实际新增的行数（已拥有的角色跳过、不报错）
 	AssignUserRoles(ctx context.Context, arg AssignUserRolesParams) (int64, error)
+	// 命名查询：读、写、权限判断都走 sqlc 类型层。
+	// 归属类参数用 sqlc.narg（生成 *int64 可空指针），NULL 原样传给
+	// 判断函数，表示"没有这个归属"，不做零值转换。
+	// 每条查询上方的注释会被 sqlc 带进生成的 Go 代码（godoc），
+	// 修改时记得同步。
 	// 判断当前用户能否把某个角色分配给某个用户（规则见 fn_can_assign_role）
 	CanAssignRole(ctx context.Context, arg CanAssignRoleParams) (bool, error)
 	// 批量版：一次判断多个角色，每个角色一行（role_id, ok），
@@ -27,13 +32,6 @@ type Querier interface {
 	// 按 id 锁定并读取一行 basic（FOR UPDATE）：改归属前先拿到它
 	// 现在的归属值，防止并发修改后按旧值判断
 	GetBasicForUpdate(ctx context.Context, id int64) (Basic, error)
-	// 命名查询：读、写、权限判断都走 sqlc 类型层。
-	// 归属类参数用 sqlc.narg（生成 *int64 可空指针），NULL 原样传给
-	// 判断函数，表示"没有这个归属"，不做零值转换。
-	// 每条查询上方的注释会被 sqlc 带进生成的 Go 代码（godoc），
-	// 修改时记得同步。
-	// 按主键查一个用户（RLS 生效：别的租户里查不到）
-	GetUser(ctx context.Context, id int64) (SysUser, error)
 	// 查某个用户是否已拥有某个角色（分配后的结果确认）
 	HasUserRole(ctx context.Context, arg HasUserRoleParams) (bool, error)
 	// 修改一行 basic 的归属（判断通过后调用）。归属参数传 NULL 表示
