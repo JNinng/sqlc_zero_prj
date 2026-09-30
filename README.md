@@ -40,7 +40,7 @@ sqlcpg/                  生成目录（sqlc 工作区）
   seed.sql               种子（基础数据 + data_scope 演示数据 + basic 归属矩阵）
   gen/                   生成代码（勿手改）
 perm/                    权限查询接口服务层（接口本体，传输无关；宿主自包 HTTP/gRPC）
-example/                 独立 Go module（replace => ../），消费方接入范式
+example/                 独立 Go module（replace => ../），业务项目接入范式
   mod.go                 门面：AuthContext → RLS 会话注入 → Scope 注入 → List/Count
   cmd/demo/main.go       可运行验收：重建测试库 + 23 场景断言
 docs/adr/                架构决策记录（ADR）
