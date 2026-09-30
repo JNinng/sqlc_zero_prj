@@ -14,3 +14,5 @@
 - 归属列保留 @dynamic: exact, in 业务过滤，作为视角收窄通道。
 
 > 修订：守卫函数返回形态后来改为数组三态契约（NULL=全租户，插件 v0.1.2 in_any 守卫消费），见 [ADR-0005](0005-in-any-three-state-guard.md)；本文的单参决策不变。
+>
+> 修订：basic-db-table/fun.sql 已入库并与本项目对齐——同名同构三件套 fn_accessible_user_ids / fn_accessible_dept_ids / fn_accessible_group_ids（数组三态契约，含用户组维度），上方"fun.sql 保持原样"决策作废，模板侧与消费侧共用一套命名；本文的单参决策不变。
