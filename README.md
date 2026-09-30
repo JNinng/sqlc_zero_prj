@@ -1,6 +1,6 @@
 # sqlc_zero_prj — 可复制的数据权限体系
 
-以 [basic-db-table](../../template/basic-db-table) 的多租户 RBAC 库表为基础，用
+以 [basic_db_table](https://github.com/JNinng/basic_db_table) 的多租户 RBAC 库表为基础，用
 [sqlc](https://sqlc.dev) + 自定义插件 [sqlc_gen_dynamic](../sqlc_gen_dynamic)
 生成带行级守卫的动态列表查询，形成的**可整仓复制**的数据权限起步模板：
 schema/RLS/守卫函数/种子/演示一应俱全，业务项目复制后改业务表即可运行。

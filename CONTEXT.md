@@ -1,6 +1,6 @@
 # sqlc_zero_prj 上下文
 
-可复制的数据权限体系：以 basic-db-table 的多租户 RBAC 库表为基础，用 sqlc + sqlc_gen_dynamic 生成带行级权限过滤的动态列表查询，供业务项目复制起步。
+可复制的数据权限体系：以 [basic_db_table](https://github.com/JNinng/basic_db_table) 的多租户 RBAC 库表为基础，用 sqlc + sqlc_gen_dynamic 生成带行级权限过滤的动态列表查询，供业务项目复制起步。
 
 ## 权限模型
 
@@ -29,7 +29,7 @@ _Avoid_: 权限降级、scope 收窄（与插件的 scopes 参数混淆）
 
 **权限过滤函数**:
 只以当前用户 ID 为输入、返回可见 ID 列表的数据库函数（fn_accessible_* 三件）。返回值三种：NULL=全租户不过滤（仅 data_scope=7 分支）、空数组=什么都看不到、数组=可见列表（多角色并集）。由表注释 @scope 声明后自动拼进所有动态查询的 WHERE。
-_Avoid_: 守卫函数（插件文档用语，同一概念）、权限函数、fn_perm_*（basic-db-table 的同构函数，@scope 引用的是本项目三件套）
+_Avoid_: 守卫函数（插件文档用语，同一概念）、权限函数、fn_perm_*（旧名，basic_db_table 的 fun.sql 已对齐更名为 fn_accessible_*，@scope 引用的是本项目三件套）
 
 **判断函数**:
 写数据前的权限判断函数（fn_can_* 三件）：输入操作者和操作对象，返回布尔；和写入在同一个事务里执行，false 就报错回滚。

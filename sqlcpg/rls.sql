@@ -11,8 +11,8 @@
 --      读不到、写不进（默认全拒）
 --   4. test_u 演示用户与授权（GRANT CONNECT 依赖库名，由部署方执行）
 --
--- 这三个函数和 basic-db-table/fun.sql 里的 fn_perm_* 是同一套逻辑；
--- 区别只有一处：这里多一个 fn_accessible_group_ids，补上用户组维度。
+-- 这三个函数与模板仓库 basic_db_table（https://github.com/JNinng/basic_db_table）
+-- 的 fun.sql 同名同构：模板侧与消费侧共用一套命名与形态（含用户组维度）。
 -- ============================================================
 
 
