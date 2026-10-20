@@ -7,8 +7,8 @@
 // 判断与维度选择、批量过滤、功能权限码、可视范围三态、用户字段
 // 投影、范围版本缓存失效）。任一断言失败即以非零码退出。
 //
-// 运行（在仓库根目录）: go run ./example/cmd/demo
-// 连接:管理库默认 postgres://postgresql:root@localhost:5432/postgres，
+// 运行（在 example/ 目录）: go run ./cmd/demo
+// 连接: 管理库默认 postgres://postgresql:root@localhost:5432/postgres，
 // 可经 ZERO_DEMO_ADMIN_DSN 覆盖；测试库 sqlc_zero_prj_demo 每次重建。
 package main
 
@@ -111,8 +111,9 @@ func run() error {
 	return nil
 }
 
-// setup 重建测试库并按序应用 schema / rls / seed（需超级用户管理连接，
-// 超级用户绕过 RLS 才能灌入含跨租户行的种子），随后补授 test_u 连接权。
+// setup 重建测试库并按序应用 schema / rls / operate / expose / seed
+// （需超级用户管理连接，超级用户绕过 RLS 才能灌入含跨租户行的种子），
+// 随后补授 test_u 连接权。
 func setup(ctx context.Context) error {
 	adminDSN := os.Getenv("ZERO_DEMO_ADMIN_DSN")
 	if adminDSN == "" {
@@ -542,7 +543,7 @@ func deref(p *int64) any {
 func int64Ptr(v int64) *int64 { return &v }
 
 // checkVisibleScenario [18] 单点判断 + 维度选择：同一条归属，
-// 换维度掩码结论不同；无效掩码 fail-closed。
+// 换维度掩码结论不同；掩码 0 fail-closed。
 func (d *demo) checkVisibleScenario(ctx context.Context) {
 	fmt.Println("== [18] 权限查询：单点判断 + 维度选择（lisi） ==")
 	svc := perm.New(d.pool)
@@ -711,7 +712,7 @@ func (d *demo) listVisibleUsersScenario(ctx context.Context) {
 	for _, u := range res.Items {
 		ids = append(ids, u.ID)
 	}
-	slices.Sort(ids) // 动态列表默认 id 倒序，断言按集合比较
+	slices.Sort(ids) // 动态列表默认按 created_at 倒序，断言按集合比较
 	fmt.Printf("   可见用户(id,nickname): ")
 	for _, u := range res.Items {
 		fmt.Printf("%d:%s ", u.ID, u.Nickname)

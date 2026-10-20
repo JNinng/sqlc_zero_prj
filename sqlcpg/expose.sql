@@ -49,7 +49,7 @@
 --               否则归属人非空且命中可见用户集才通过。
 --   归属部门、归属用户组维度同构。
 --   用户无效（不存在/禁用/删除）时三个集合都是空数组，永远不通过；
---   p_dims 无效（0 或超出 1|2|4 的位）没有选中任何维度，同样不通过。
+--   p_dims 为 0（未选中任何维度）同样不通过；1/2/4 之外的位被忽略。
 --
 -- 返回：true = 可见（即可操作）；false = 拒绝（拒绝不是错误）。
 -- ------------------------------------------------------------
@@ -72,7 +72,7 @@ SELECT ((p_dims & 1) <> 0 AND (
                 AND p_owner_user_group_id = ANY (public.fn_accessible_group_ids(p_user_id)))))
 $$;
 
-COMMENT ON FUNCTION public.fn_check_visible(int8, int2, int8, int8, int8) IS '查询判断（只读）：当前用户按指定维度掩码（1人/2部门/4组，OR 并集）能否看见一条数据，读写同权。有全租户角色时选中维度直接通过；否则非空归属命中对应可见集合才通过；用户无效或掩码无效永远不通过。不与写事务绑定，拒绝返回 false 不是错误。';
+COMMENT ON FUNCTION public.fn_check_visible(int8, int2, int8, int8, int8) IS '查询判断（只读）：当前用户按指定维度掩码（1人/2部门/4组，OR 并集）能否看见一条数据，读写同权。有全租户角色时选中维度直接通过；否则非空归属命中对应可见集合才通过；用户无效或掩码未选中任何维度（0）永远不通过。不与写事务绑定，拒绝返回 false 不是错误。';
 
 
 -- ------------------------------------------------------------
@@ -114,9 +114,8 @@ COMMENT ON FUNCTION public.fn_filter_visible_rows(int8, int2, int8[], int8[], in
 -- ------------------------------------------------------------
 -- fn_has_permission：当前用户是否持有某功能权限码
 --
--- 功能权限轴的库内判定（此前只有 sys_menu 表和角色映射，没有
--- 判定函数）。与数据范围轴正交：只看角色 → 菜单 → 权限码这条链，
--- 不管能看见哪些行。
+-- 功能权限轴的库内判定。与数据范围轴正交：只看角色 → 菜单 →
+-- 权限码这条链，不管能看见哪些行。
 --
 -- 参数：
 --   p_user_id  当前用户
@@ -179,7 +178,7 @@ CREATE TABLE IF NOT EXISTS public.sys_perm_version
     CONSTRAINT sys_perm_version_pkey PRIMARY KEY (tenant_id, user_id)
 );
 
-COMMENT ON TABLE public.sys_perm_version IS '范围版本表：外部进程缓存判定结果的失效信号（ADR-0008）。user_id=0 是租户级行（角色/菜单/组织侧变更 bump，全体缓存失效）；user_id>0 是用户级行（该用户自身行/角色映射变更 bump，只失效该用户）。版本只用于相等比较，由触发器维护，不手工读写。';
+COMMENT ON TABLE public.sys_perm_version IS '范围版本表：外部进程缓存判定结果的失效信号（ADR-0008）。user_id=0 是租户级行（角色/菜单/组织侧变更 bump，全体缓存失效）；user_id>0 是用户级行（该用户自身行/角色映射变更 bump，只失效该用户）。版本只用于相等比较，由触发器维护，业务代码不直接写入。';
 
 COMMENT ON COLUMN public.sys_perm_version.version IS '单调递增计数，从 1 开始；只比较是否变化，不比较大小语义';
 
@@ -232,6 +231,8 @@ BEGIN
 END
 $$;
 
+COMMENT ON FUNCTION public.fn_touch_perm_version_user_row() IS '范围版本触发器（sys_user 专用）：按 TG_OP 从 OLD/NEW 取租户与用户并转 bump——DELETE 用 OLD，UPDATE 换 id 时两侧都 bump，其余用 NEW。RETURN NULL，不改写行内容。';
+
 -- sys_user_role_mapping 专用：用户从 user_id 列取
 CREATE OR REPLACE FUNCTION public.fn_touch_perm_version_mapping()
     RETURNS trigger
@@ -250,6 +251,8 @@ BEGIN
 END
 $$;
 
+COMMENT ON FUNCTION public.fn_touch_perm_version_mapping() IS '范围版本触发器（sys_user_role_mapping 专用）：从 user_id 列取用户并转 bump——DELETE 用 OLD，UPDATE 换用户时两侧都 bump，其余用 NEW。RETURN NULL。';
+
 -- 角色侧/菜单侧/组织侧通用：一律 bump 租户级行（user_id=0）
 CREATE OR REPLACE FUNCTION public.fn_touch_perm_version_tenant()
     RETURNS trigger
@@ -265,6 +268,7 @@ BEGIN
 END
 $$;
 
+COMMENT ON FUNCTION public.fn_touch_perm_version_tenant() IS '范围版本触发器（角色/菜单/组织侧通用）：DELETE 用 OLD、其余用 NEW，统一 bump 租户级行（user_id=0）。RETURN NULL。';
 
 -- ------------------------------------------------------------
 -- 触发器挂载。用户级：只 bump 该用户；租户级：bump 租户行。
