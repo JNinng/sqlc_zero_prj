@@ -1,11 +1,12 @@
 // demo 是数据权限体系的可运行验收入口：重建独立测试库 → 按序应用
 // schema.sql / rls.sql / operate.sql / expose.sql / seed.sql → 以 test_u
-// 普通角色连接执行 23 个场景：[1]-[12] 验证读（各档数据范围能看到哪些
+// 普通角色连接执行 24 个场景：[1]-[12] 验证读（各档数据范围能看到哪些
 // 行、多角色并集、忘注入 Scope 直接报错、漏设租户什么都看不到、加
 // 过滤条件只能看得更少）；[13]-[17] 验证写（分配角色、批量分配多个
-// 角色、修改归属前的权限判断）；[18]-[23] 验证权限查询接口（单点
+// 角色、修改归属前的权限判断）；[18]-[24] 验证权限查询接口（单点
 // 判断与维度选择、批量过滤、功能权限码、可视范围三态、用户字段
-// 投影、范围版本缓存失效）。任一断言失败即以非零码退出。
+// 投影、范围版本缓存失效、组成员/新增用户失效与停用用户边界）。
+// 任一断言失败即以非零码退出。
 //
 // 运行（在 example/ 目录）: go run ./cmd/demo
 // 连接: 管理库默认 postgres://postgresql:root@localhost:5432/postgres，
@@ -92,7 +93,7 @@ func run() error {
 	// [17] 放在写场景最后：批量演示会给 lisi 追加角色 106，改变 lisi 的可见范围，
 	// 不能影响前面的 [15]
 	d.assignBatchScenario(ctx)
-	// [18]-[23] 权限查询接口（perm 服务层）：注意 [17] 已给 lisi 加了
+	// [18]-[24] 权限查询接口（perm 服务层）：注意 [17] 已给 lisi 加了
 	// 角色 106（指定人 lisi/wangwu），lisi 的可见用户是 {3,4}，
 	// 后续断言都按这个状态写
 	d.checkVisibleScenario(ctx)
@@ -100,14 +101,16 @@ func run() error {
 	d.permissionCodeScenario(ctx)
 	d.scopeStateScenario(ctx)
 	d.listVisibleUsersScenario(ctx)
-	// [23] 放最后：给 lisi 追加角色 104 会再改变 lisi 的可见范围
+	// [23] 给 lisi 追加角色 104 会再改变 lisi 的可见范围
 	d.versionBumpScenario(ctx)
+	// [24] 再改组成员/新增用户并停用 lisi，最后恢复
+	d.versionBoundaryScenario(ctx)
 
 	fmt.Println()
 	if d.fails > 0 {
 		return fmt.Errorf("%d 个场景断言失败", d.fails)
 	}
-	fmt.Println("全部 23 个场景通过 ✔")
+	fmt.Println("全部 24 个场景通过 ✔")
 	return nil
 }
 
@@ -534,7 +537,7 @@ func deref(p *int64) any {
 }
 
 // ------------------------------------------------------------
-// [18]-[23] 权限查询接口：perm 服务层的本地调用演示（外部进程
+// [18]-[24] 权限查询接口：perm 服务层的本地调用演示（外部进程
 // 经 HTTP/gRPC 调用的就是这些方法；传输外壳由宿主自包）。
 // 前置状态注意：[17] 已给 lisi(3) 追加角色 106（指定人 3/4），
 // lisi 可见用户 {3,4}、可见部门 {3}（103 仅本人也含自己部门）。
@@ -768,6 +771,127 @@ func (d *demo) versionBumpScenario(ctx context.Context) {
 	d.check(after.Tenant == before.Tenant, "租户级版本不动（角色映射变更不风暴全租户）")
 	d.check(otherAfter.User == otherBefore.User && otherAfter.Tenant == otherBefore.Tenant,
 		"wangwu 两个版本都不动（一人变更只失效该用户缓存）")
+}
+
+// versionBoundaryScenario [24] 范围版本与枚举边界：组成员/新增用户会
+// 改变其他用户的派生可见集合，必须 bump 租户级版本；停用用户的
+// 角色/权限码枚举为空（与 fn_has_permission 的语义一致）。
+func (d *demo) versionBoundaryScenario(ctx context.Context) {
+	fmt.Println("== [24] 权限查询：组成员/新增用户失效 + 停用用户边界 ==")
+	svc := perm.New(d.pool)
+
+	// 组成员变更：zhangsan 的角色 108 指定组 2，把 sunqi(6) 加入组 2
+	before, err := svc.GetScopeVersion(ctx, d.pauth("zhangsan"))
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 执行错误: %v\n", err)
+		return
+	}
+	err = example.Begin(ctx, d.pool, d.auth("admin"), func(s *example.Session) error {
+		_, err := s.Tx().Exec(ctx, `
+			INSERT INTO public.sys_user_group_mapping (group_id, user_id, tenant_id, created_by)
+			VALUES (2, $1, current_setting('app.tenant_id'), 1)`, userID["sunqi"])
+		return err
+	})
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 组成员写入: %v\n", err)
+		return
+	}
+	after, err := svc.GetScopeVersion(ctx, d.pauth("zhangsan"))
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 执行错误: %v\n", err)
+		return
+	}
+	fmt.Printf("   zhangsan 版本: 租户 %d → %d\n", before.Tenant, after.Tenant)
+	d.check(after.Tenant > before.Tenant, "组成员变更 bump 租户级版本（他人可见集合失效）")
+	sc, err := svc.GetScope(ctx, d.pauth("zhangsan"))
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 执行错误: %v\n", err)
+		return
+	}
+	d.check(sc.Users.Visible(userID["sunqi"]), "zhangsan 可见用户包含新入组的 sunqi(6)")
+
+	// 新增用户：user 11 落在部门 2，进入 zhouba 的部门子树可见集合
+	before, err = svc.GetScopeVersion(ctx, d.pauth("zhouba"))
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 执行错误: %v\n", err)
+		return
+	}
+	err = example.Begin(ctx, d.pool, d.auth("admin"), func(s *example.Session) error {
+		_, err := s.Tx().Exec(ctx, `
+			INSERT INTO public.sys_user
+			    (id, status, created_by, updated_by, tenant_id, owner_user_id, owner_dept_id, "name", nickname, "password")
+			VALUES (11, 1, 1, 1, current_setting('app.tenant_id'), 1, 2, 'newuser', '新用户', 'x')`)
+		return err
+	})
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 新增用户写入: %v\n", err)
+		return
+	}
+	after, err = svc.GetScopeVersion(ctx, d.pauth("zhouba"))
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 执行错误: %v\n", err)
+		return
+	}
+	fmt.Printf("   zhouba 版本: 租户 %d → %d\n", before.Tenant, after.Tenant)
+	d.check(after.Tenant > before.Tenant, "新增用户 bump 租户级版本（部门成员集合变化）")
+	sc, err = svc.GetScope(ctx, d.pauth("zhouba"))
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 执行错误: %v\n", err)
+		return
+	}
+	d.check(sc.Users.Visible(11), "zhouba 可见用户包含新增用户 11")
+
+	// 停用 lisi：角色/权限码枚举必须为空（与 fn_has_permission 一致）
+	err = example.Begin(ctx, d.pool, d.auth("admin"), func(s *example.Session) error {
+		_, err := s.Tx().Exec(ctx, `UPDATE public.sys_user SET status = 0 WHERE id = $1`, userID["lisi"])
+		return err
+	})
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 停用 lisi: %v\n", err)
+		return
+	}
+	roles, err := svc.GetUserRoles(ctx, d.pauth("lisi"))
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 执行错误: %v\n", err)
+		return
+	}
+	codes, err := svc.GetPermissionCodes(ctx, d.pauth("lisi"))
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 执行错误: %v\n", err)
+		return
+	}
+	has, err := svc.HasPermission(ctx, d.pauth("lisi"), "sys:user:query")
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 执行错误: %v\n", err)
+		return
+	}
+	fmt.Printf("   停用 lisi: roles=%d codes=%d has=%v\n", len(roles), len(codes), has)
+	d.check(len(roles) == 0 && len(codes) == 0 && !has,
+		"停用用户的角色/权限码枚举为空，HasPermission=false")
+
+	// 恢复 lisi，避免影响后续手工使用演示库
+	err = example.Begin(ctx, d.pool, d.auth("admin"), func(s *example.Session) error {
+		_, err := s.Tx().Exec(ctx, `UPDATE public.sys_user SET status = 1 WHERE id = $1`, userID["lisi"])
+		return err
+	})
+	if err != nil {
+		d.fails++
+		fmt.Printf("   FAIL 恢复 lisi: %v\n", err)
+		return
+	}
+	d.check(true, "lisi 已恢复启用")
 }
 
 type demo struct {

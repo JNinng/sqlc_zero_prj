@@ -13,7 +13,7 @@ FUNCTION`、本文件的索引表。
 | 1 | schema.sql | 建表，表注释里带 @dynamic/@scope 指令；部门闭包触发器 | 是 | 22 张表、1 个触发器函数 |
 | 2 | rls.sql | 租户隔离 RLS 策略；三个权限过滤函数；updated_at 触发器；test_u 授权 | 是（只读函数签名） | 21 条策略、4 个函数 |
 | 3 | operate.sql | 写数据前的权限判断函数 | 是（只读函数签名） | 4 个判断函数 |
-| 4 | expose.sql | 权限查询接口：面向外部进程的只读判定函数；范围版本表 + bump 触发器 | 是（只读函数签名） | 3 个查询判断函数、1 张版本表、4 个版本维护函数（bump + 3 个触发器函数） |
+| 4 | expose.sql | 权限查询接口：面向外部进程的只读判定函数；范围版本表 + bump 触发器 | 是（只读函数签名） | 3 个查询判断函数、1 张版本表、3 个版本维护函数（bump + 2 个触发器函数） |
 | 5 | seed.sql | 种子数据（含权限演示数据） | 否 | 租户/部门/角色/用户/用户组/字典 + basic 演示数据 + 菜单/日志/配置/特性/翻译 |
 
 - sqlc.yaml 的 schema 列表是 `[schema.sql, rls.sql, operate.sql,
@@ -82,11 +82,12 @@ fn_filter_visible_rows）与上面两个家族共用同一套 data_scope 推导�
 | fn_maintain_dept_closure | schema.sql | 部门增删改时自动维护闭包表：校验父部门、防环；软删当删除处理、恢复当新增处理；还有子部门时不允许删 |
 | fn_touch_updated_at | rls.sql | UPDATE 时如果应用层没改 updated_at，就自动刷新它（批量挂在所有有 updated_at 列的表上） |
 | fn_bump_perm_version | expose.sql | 范围版本自增（ADR-0008）：租户级行（user_id=0）或用户级行，不存在从 1 起建 |
-| fn_touch_perm_version_user_row | expose.sql | sys_user 行变化 → bump 该用户版本（挂在 status/软删/归属三元组列上） |
 | fn_touch_perm_version_mapping | expose.sql | sys_user_role_mapping 增删改 → bump 该用户版本 |
-| fn_touch_perm_version_tenant | expose.sql | 角色/菜单/组织侧表增删改 → bump 租户级行（挂在 sys_role、sys_role_id_scope、sys_role_menu、sys_menu、sys_dept 上） |
+| fn_touch_perm_version_tenant | expose.sql | 角色/菜单/组织侧/用户组/用户行变更 → bump 租户级行（挂在 sys_role、sys_role_id_scope、sys_role_menu、sys_menu、sys_dept、sys_user_group、sys_user_group_mapping，以及 sys_user 的新增/删除/状态/归属列上） |
 
-触发器挂载清单应覆盖判定函数的全部输入表；新增/移除输入表时，判定函数与触发器清单两处同步。
+用户级触发器只用于 sys_user_role_mapping；sys_user 行变化 bump 租户级版本。
+
+触发器挂载清单应覆盖查询判断函数的全部输入表；新增/移除输入表时，函数与触发器清单两处同步。
 
 ## 命名查询索引（queries.sql）
 
@@ -103,8 +104,8 @@ fn_filter_visible_rows）与上面两个家族共用同一套 data_scope 推导�
 | CheckVisible | :one | 操作者/维度掩码/归属三元组（可空）→ bool | 权限查询：单点可见性判断（fn_check_visible） |
 | HasPermission | :one | 操作者/权限码 → bool | 权限查询：功能权限码判断（fn_has_permission） |
 | GetScope | :one | 操作者 → 三个 int8[] 列（可 NULL） | 权限查询：三维度可见集合一次取回（三件套同返；NULL=全租户由 perm 层翻成 All） |
-| GetUserRoles | :many | 用户 → SysRole 行 | 权限查询：枚举有效角色 |
-| GetPermissionCodes | :many | 用户 → 权限码列表（去重排序） | 权限查询：枚举权限码（菜单渲染/网关缓存） |
+| GetUserRoles | :many | 用户 → SysRole 行 | 权限查询：枚举有效用户的角色（用户无效时为空） |
+| GetPermissionCodes | :many | 用户 → 权限码列表（去重排序） | 权限查询：枚举有效用户的权限码（用户无效时为空；菜单渲染/网关缓存） |
 | GetScopeVersion | :one | 用户 → (租户版本, 用户版本) | 权限查询：范围版本，缓存失效信号（ADR-0008；行不存在补 0） |
 
 批量过滤 fn_filter_visible_rows 没有对应命名查询：sqlc 解析不了

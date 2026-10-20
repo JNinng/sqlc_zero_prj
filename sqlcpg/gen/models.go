@@ -302,7 +302,7 @@ type SysOperationLog struct {
 	CreatedAt pgtype.Timestamp `db:"created_at" json:"created_at"`
 }
 
-// 范围版本表：外部进程缓存判定结果的失效信号（ADR-0008）。user_id=0 是租户级行（角色/菜单/组织侧变更 bump，全体缓存失效）；user_id>0 是用户级行（该用户自身行/角色映射变更 bump，只失效该用户）。版本只用于相等比较，由触发器维护，业务代码不直接写入。
+// 范围版本表：外部进程缓存判定结果的失效信号（ADR-0008）。user_id=0 是租户级行（角色/菜单/组织侧、用户组/组成员、用户行新增/删除及状态/归属变更 bump，全体缓存失效）；user_id>0 是用户级行（角色映射变更 bump，只失效该用户）。版本只用于相等比较，由触发器维护，业务代码不直接写入。
 type SysPermVersion struct {
 	TenantID string `db:"tenant_id" json:"tenant_id"`
 	UserID   int64  `db:"user_id" json:"user_id"`

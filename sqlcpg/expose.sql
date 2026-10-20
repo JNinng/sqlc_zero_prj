@@ -159,9 +159,10 @@ COMMENT ON FUNCTION public.fn_has_permission(int8, varchar) IS '查询判断（�
 -- 对删除视而不见，所以版本由触发器维护。
 --
 -- 双粒度：
---   user_id = 0   租户级行——角色/菜单/组织侧变更 bump，
+--   user_id = 0   租户级行——影响多个用户的变更（角色/菜单/组织侧、
+--                 用户组/组成员、用户行新增/删除及状态/归属）bump，
 --                 该租户所有用户的缓存都要重拉；
---   user_id > 0   用户级行——该用户自身行/角色映射变更 bump，
+--   user_id > 0   用户级行——只影响本人的角色映射变更 bump，
 --                 只失效这一个用户的缓存。
 -- 缓存有效性 = 两个版本都未变（GetScopeVersion 一次取回两个）。
 --
@@ -178,7 +179,7 @@ CREATE TABLE IF NOT EXISTS public.sys_perm_version
     CONSTRAINT sys_perm_version_pkey PRIMARY KEY (tenant_id, user_id)
 );
 
-COMMENT ON TABLE public.sys_perm_version IS '范围版本表：外部进程缓存判定结果的失效信号（ADR-0008）。user_id=0 是租户级行（角色/菜单/组织侧变更 bump，全体缓存失效）；user_id>0 是用户级行（该用户自身行/角色映射变更 bump，只失效该用户）。版本只用于相等比较，由触发器维护，业务代码不直接写入。';
+COMMENT ON TABLE public.sys_perm_version IS '范围版本表：外部进程缓存判定结果的失效信号（ADR-0008）。user_id=0 是租户级行（角色/菜单/组织侧、用户组/组成员、用户行新增/删除及状态/归属变更 bump，全体缓存失效）；user_id>0 是用户级行（角色映射变更 bump，只失效该用户）。版本只用于相等比较，由触发器维护，业务代码不直接写入。';
 
 COMMENT ON COLUMN public.sys_perm_version.version IS '单调递增计数，从 1 开始；只比较是否变化，不比较大小语义';
 
@@ -214,25 +215,6 @@ COMMENT ON FUNCTION public.fn_bump_perm_version(varchar, int8) IS '范围版本�
 -- 触发器函数：按 TG_OP 从 OLD/NEW 取租户与用户，转发给 bump。
 -- 全部 AFTER ROW 触发，RETURN NULL（不改写行内容）。
 -- ------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.fn_touch_perm_version_user_row()
-    RETURNS trigger
-    LANGUAGE plpgsql
-AS $$
-BEGIN
-    IF TG_OP = 'DELETE' THEN
-        PERFORM public.fn_bump_perm_version(OLD.tenant_id, OLD.id);
-    ELSIF TG_OP = 'UPDATE' AND OLD.id IS DISTINCT FROM NEW.id THEN
-        PERFORM public.fn_bump_perm_version(OLD.tenant_id, OLD.id);
-        PERFORM public.fn_bump_perm_version(NEW.tenant_id, NEW.id);
-    ELSE
-        PERFORM public.fn_bump_perm_version(NEW.tenant_id, NEW.id);
-    END IF;
-    RETURN NULL;
-END
-$$;
-
-COMMENT ON FUNCTION public.fn_touch_perm_version_user_row() IS '范围版本触发器（sys_user 专用）：按 TG_OP 从 OLD/NEW 取租户与用户并转 bump——DELETE 用 OLD，UPDATE 换 id 时两侧都 bump，其余用 NEW。RETURN NULL，不改写行内容。';
-
 -- sys_user_role_mapping 专用：用户从 user_id 列取
 CREATE OR REPLACE FUNCTION public.fn_touch_perm_version_mapping()
     RETURNS trigger
@@ -253,7 +235,7 @@ $$;
 
 COMMENT ON FUNCTION public.fn_touch_perm_version_mapping() IS '范围版本触发器（sys_user_role_mapping 专用）：从 user_id 列取用户并转 bump——DELETE 用 OLD，UPDATE 换用户时两侧都 bump，其余用 NEW。RETURN NULL。';
 
--- 角色侧/菜单侧/组织侧通用：一律 bump 租户级行（user_id=0）
+-- 角色/菜单/组织侧/用户组/用户行通用：一律 bump 租户级行（user_id=0）
 CREATE OR REPLACE FUNCTION public.fn_touch_perm_version_tenant()
     RETURNS trigger
     LANGUAGE plpgsql
@@ -268,18 +250,18 @@ BEGIN
 END
 $$;
 
-COMMENT ON FUNCTION public.fn_touch_perm_version_tenant() IS '范围版本触发器（角色/菜单/组织侧通用）：DELETE 用 OLD、其余用 NEW，统一 bump 租户级行（user_id=0）。RETURN NULL。';
+COMMENT ON FUNCTION public.fn_touch_perm_version_tenant() IS '范围版本触发器（角色/菜单/组织侧/用户组/用户行通用）：DELETE 用 OLD、其余用 NEW，统一 bump 租户级行（user_id=0）。RETURN NULL。';
 
 -- ------------------------------------------------------------
 -- 触发器挂载。用户级：只 bump 该用户；租户级：bump 租户行。
--- 挂载清单 = 判定函数的输入表清单，两处必须同步改（见文件头）。
+-- 挂载清单应覆盖查询判断函数的全部输入表，两处必须同步改（见文件头）。
 -- ------------------------------------------------------------
--- 用户自身行：状态/软删/归属三元组变化影响"这个用户能看见什么"
--- （仅本人/本部门档位读自己的归属推导可见集）
+-- 用户行：新增/删除/状态/归属变化改变部门与组成员推导，
+-- 进而影响其他用户的派生可见集合 → bump 租户级版本
 CREATE TRIGGER trg_perm_version_user
-    AFTER UPDATE OF status, deleted_at, owner_user_id, owner_dept_id, owner_user_group_id
+    AFTER INSERT OR UPDATE OF status, deleted_at, owner_user_id, owner_dept_id, owner_user_group_id OR DELETE
     ON public.sys_user
-    FOR EACH ROW EXECUTE FUNCTION public.fn_touch_perm_version_user_row();
+    FOR EACH ROW EXECUTE FUNCTION public.fn_touch_perm_version_tenant();
 
 -- 用户-角色映射：挂上/摘掉角色直接影响该用户全部判定
 CREATE TRIGGER trg_perm_version_user_role
@@ -315,6 +297,18 @@ CREATE TRIGGER trg_perm_version_menu
 CREATE TRIGGER trg_perm_version_dept
     AFTER INSERT OR UPDATE OR DELETE
     ON public.sys_dept
+    FOR EACH ROW EXECUTE FUNCTION public.fn_touch_perm_version_tenant();
+
+-- 用户组：状态/软删/增删改变 data_scope=6 可见的用户组集合
+CREATE TRIGGER trg_perm_version_user_group
+    AFTER INSERT OR UPDATE OR DELETE
+    ON public.sys_user_group
+    FOR EACH ROW EXECUTE FUNCTION public.fn_touch_perm_version_tenant();
+
+-- 组成员映射：增删改改变 data_scope=6 可见的用户/部门集合
+CREATE TRIGGER trg_perm_version_user_group_mapping
+    AFTER INSERT OR UPDATE OR DELETE
+    ON public.sys_user_group_mapping
     FOR EACH ROW EXECUTE FUNCTION public.fn_touch_perm_version_tenant();
 
 -- 本文件在 rls.sql 的批量授权之后执行，显式补授（触发器以写入者
