@@ -13,8 +13,8 @@ FUNCTION`、本文件的索引表。
 | 1 | schema.sql | 建表，表注释里带 @dynamic/@scope 指令；部门闭包触发器 | 是 | 22 张表、1 个触发器函数 |
 | 2 | rls.sql | 租户隔离 RLS 策略；三个权限过滤函数；updated_at 触发器；test_u 授权 | 是（只读函数签名） | 21 条策略、4 个函数 |
 | 3 | operate.sql | 写数据前的权限判断函数 | 是（只读函数签名） | 4 个判断函数 |
-| 4 | expose.sql | 权限查询接口：面向外部进程的只读判定函数；范围版本表 + bump 触发器 | 是（只读函数签名） | 3 个查询判断函数、1 张版本表、3 个触发器函数 |
-| 5 | seed.sql | 种子数据（含权限演示数据） | 否 | 租户/部门/角色/用户/用户组/字典 + basic 演示数据 |
+| 4 | expose.sql | 权限查询接口：面向外部进程的只读判定函数；范围版本表 + bump 触发器 | 是（只读函数签名） | 3 个查询判断函数、1 张版本表、4 个版本维护函数（bump + 3 个触发器函数） |
+| 5 | seed.sql | 种子数据（含权限演示数据） | 否 | 租户/部门/角色/用户/用户组/字典 + basic 演示数据 + 菜单/日志/配置/特性/翻译 |
 
 - sqlc.yaml 的 schema 列表是 `[schema.sql, rls.sql, operate.sql,
   expose.sql]`：加 rls/operate/expose 是为了让 queries.sql 里的查询
@@ -29,8 +29,9 @@ FUNCTION`、本文件的索引表。
 ## 函数索引
 
 属性说明：S=STABLE（同一事务内重复调用结果一致）；默认 SECURITY
-INVOKER（以调用者身份执行，受 RLS 约束）。除触发器函数外，调用前
-会话必须已设置 `app.tenant_id`。
+INVOKER（以调用者身份执行，受 RLS 约束）。所有函数都要求调用会话
+已设置 `app.tenant_id`；触发器函数由挂载表的 DML 在同一会话内触发，
+同样继承该前提。
 
 ### 权限过滤函数（rls.sql，查询用）
 
@@ -51,7 +52,7 @@ INVOKER（以调用者身份执行，受 RLS 约束）。除触发器函数外�
 
 ### 写前判断函数（operate.sql）
 
-写数据前先调用，返回 true 才执行写入（同一个事务，false 就报错回滚）。
+写数据前先调用，逐项返回 true 才执行写入（同一个事务，false 就报错回滚）。
 
 | 函数 | 签名 | 属性 | 判断什么 |
 |---|---|---|---|
@@ -62,13 +63,15 @@ INVOKER（以调用者身份执行，受 RLS 约束）。除触发器函数外�
 
 ### 查询判断函数（expose.sql，外部查询用）
 
-只读判定，不与写事务绑定；与上面两个家族共用同一套 data_scope
-推导（内外同源，ADR-0007）。供根级 `perm/` 服务层调用（HTTP/gRPC
-由宿主自包）。拒绝返回 false/空集，不是错误。
+只读判定，不与写事务绑定。数据范围判定（fn_check_visible /
+fn_filter_visible_rows）与上面两个家族共用同一套 data_scope 推导，
+功能权限判定（fn_has_permission）走角色→菜单→权限码，内外同源
+（ADR-0007）。供根级 `perm/` 服务层调用（HTTP/gRPC 由宿主自包）。
+拒绝返回 false/空集，不是错误。
 
 | 函数 | 签名 | 属性 | 判断什么 |
 |---|---|---|---|
-| fn_check_visible | (用户, 维度掩码, 归属人, 归属部门, 归属组) → boolean | S | 能否看见/操作一条数据（读写同权）。维度掩码：1 人、2 部门、4 组，按位组合 OR 并集；fn_can_operate_row 等价于掩码 7。掩码无效（0/超界）fail-closed |
+| fn_check_visible | (用户, 维度掩码, 归属人, 归属部门, 归属组) → boolean | S | 能否看见/操作一条数据（读写同权）。维度掩码：1 人、2 部门、4 组，按位组合 OR 并集；fn_can_operate_row 等价于掩码 7。掩码 0（未选中维度）fail-closed；1/2/4 之外的位忽略 |
 | fn_filter_visible_rows | (用户, 维度掩码, 归属人数组, 归属部门数组, 归属组数组) → 归属三元组行集 | S | 上面那条的批量版：三个数组按下标对齐，只返回可见子集（保持传入顺序）。数组元素可为 NULL（无该归属） |
 | fn_has_permission | (用户, 权限码) → boolean | S | 功能权限轴：用户的有效角色是否关联了携带该权限码的有效菜单（角色→菜单→权限码，与数据范围正交） |
 
@@ -83,7 +86,7 @@ INVOKER（以调用者身份执行，受 RLS 约束）。除触发器函数外�
 | fn_touch_perm_version_mapping | expose.sql | sys_user_role_mapping 增删改 → bump 该用户版本 |
 | fn_touch_perm_version_tenant | expose.sql | 角色/菜单/组织侧表增删改 → bump 租户级行（挂在 sys_role、sys_role_id_scope、sys_role_menu、sys_menu、sys_dept 上） |
 
-挂载清单 = 判定函数的输入表清单，两处必须同步改。
+触发器挂载清单应覆盖判定函数的全部输入表；新增/移除输入表时，判定函数与触发器清单两处同步。
 
 ## 命名查询索引（queries.sql）
 
@@ -113,8 +116,8 @@ INVOKER（以调用者身份执行，受 RLS 约束）。除触发器函数外�
 
 ## RLS 策略（rls.sql）
 
-21 张租户表用同一条规则：`tenant_id = current_setting('app.tenant_id')`，
-读和写都检查，表主也不豁免（FORCE）。会话没设置 app.tenant_id 时
-什么都读不到、写不进。sys_tenant 额外允许命中自身 id（子租户挂在
-父租户名下时还能读写自己的行）。sys_config 是全局配置、没有租户列，
-不设 RLS。
+22 张租户表（21 张基线表 + `expose.sql` 的 `sys_perm_version`）用同一条规则：
+`tenant_id = current_setting('app.tenant_id')`，读和写都检查，表主也不豁免
+（FORCE）。会话没设置 app.tenant_id 时什么都读不到、写不进。sys_tenant
+额外允许命中自身 id（子租户挂在父租户名下时还能读写自己的行）。sys_config
+是全局配置、没有租户列，不设 RLS。

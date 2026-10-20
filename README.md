@@ -1,7 +1,7 @@
 # sqlc_zero_prj — 可复制的数据权限体系
 
 以 [basic_db_table](https://github.com/JNinng/basic_db_table) 的多租户 RBAC 库表为基础，用
-[sqlc](https://sqlc.dev) + 自定义插件 [sqlc_gen_dynamic](../sqlc_gen_dynamic)
+[sqlc](https://sqlc.dev) + 自定义插件 [sqlc_gen_dynamic](https://github.com/JNinng/sqlc_gen_dynamic)
 生成带行级守卫的动态列表查询，形成的**可整仓复制**的数据权限起步模板：
 schema/RLS/守卫函数/种子/演示一应俱全，业务项目复制后改业务表即可运行。
 
@@ -11,16 +11,16 @@ schema/RLS/守卫函数/种子/演示一应俱全，业务项目复制后改业�
 
 | 层 | 维度 | 执行者 | 失效姿态 |
 |---|---|---|---|
-| PostgreSQL RLS | 租户隔离（绝对边界） | 21 张租户表策略，`tenant_id = current_setting('app.tenant_id')`，ENABLE + FORCE | 漏设变量 → 默认全拒 |
+| PostgreSQL RLS | 租户隔离（绝对边界） | 22 张租户表策略（21 张基线表 + 范围版本表），`tenant_id = current_setting('app.tenant_id')`，ENABLE + FORCE | 漏设变量 → 默认全拒 |
 | `@scope` 守卫 | 数据范围（data_scope 1-7，多角色并集） | 生成代码 WHERE 头部注入守卫谓词 | 缺 Scope → fail-closed 报错 |
-| 判定函数（写侧） | 操作权限（分配/归属转移/行操作） | `operate.sql` 布尔判定 + 同事务先检后写 | 判定 false → ErrDenied 回滚 |
-| sys_menu 功能权限 | 功能入口（能用哪些操作） | 应用层（权限码），不做行过滤 | — |
+| 判定函数（写侧） | 操作权限（分配/归属转移/行操作） | `operate.sql` 判定函数 + 同事务先检后写 | 判定 false → ErrDenied 回滚 |
+| sys_menu 功能权限 | 功能入口（能用哪些操作） | 应用层权限码 + 库内 `fn_has_permission`，不做行过滤 | — |
 | 查询判断函数（读侧） | 同上两轴的只读暴露 | `expose.sql` 三函数 + `perm/` 服务层，内外同源（[ADR-0007](docs/adr/0007-permission-query-interface-same-source.md)） | 拒绝 = false/空集，非错误 |
 
 关键语义（速查）：
 
 - **权限过滤函数只收一个用户 ID**：`fn_accessible_user_ids/dept_ids/group_ids(用户ID)`，该用户能看到什么由函数内部查角色算出，撤销角色下一次查询立刻生效（[ADR-0002](docs/adr/0002-single-param-guard-functions.md)）。返回 `NULL`=全租户不过滤（仅 data_scope=7）、`{}`=什么都看不到、数组=可见列表（[ADR-0005](docs/adr/0005-in-any-three-state-guard.md)）。
-- **@scope 只挂在有归属字段的表上**：挂载清单以 `sqlcpg/schema.sql` 的表注释为准（模板内为 `basic` 与 `sys_user`）；其余表租户内所有人可见（[ADR-0003](docs/adr/0003-scope-only-on-owner-triple-tables.md)）。
+- **@scope 只挂在有归属字段的表上**：挂载清单以 `sqlcpg/schema.sql` 的表注释为准（模板内为 `basic` 与 `sys_user`）；其余租户表租户内所有人可见（[ADR-0003](docs/adr/0003-scope-only-on-owner-triple-tables.md)）。
 - **没有归属的数据只有全租户角色能看到**：三个归属字段全空的数据，对其他档位不可见（[ADR-0005](docs/adr/0005-in-any-three-state-guard.md)）。
 - **加过滤条件只会看得更少**：前端传 `ownerUserId=自己` 之类的条件叠加在权限过滤之上，不会放大可见范围。
 - **写之前先判断**（[ADR-0006](docs/adr/0006-operate-permission-check.md)）：能看见就能操作；改归属两头校验（这条数据有权操作 + 新归属的人/部门/组可见）；判断和写入同一事务，不通过就报 `ErrDenied`（403）回滚。角色分配的 `sys_role_allowed_dept`/`scope_dept_id` 规则由 `fn_can_assign_role` 在库内执行。
@@ -30,14 +30,14 @@ schema/RLS/守卫函数/种子/演示一应俱全，业务项目复制后改业�
 ## 目录结构
 
 ```
-sqlcpg/                  生成目录（sqlc 工作区）
+sqlcpg/                  sqlc 工作区（SQL 源 + 生成代码）
   README.md              SQL 对象参考：文件/函数/命名查询索引（改动须三处同步）
   sqlc.yaml              sqlc 配置：内置 go 生成器 + sqlc_gen_dynamic 插件并行
   schema.sql             表结构 + @dynamic/@scope DSL 注释（sqlc 输入）
   rls.sql                RLS 策略 + 守卫函数三件套 + test_u 授权（部署件；纳入 sqlc schema 列表以解析三件套签名）
-  operate.sql            操作权限判定函数三件（写侧执行体；纳入 sqlc schema 列表以解析签名）
+  operate.sql            操作权限判定函数四件（写侧执行体；纳入 sqlc schema 列表以解析签名）
   expose.sql             权限查询接口：查询判断函数三件 + 范围版本表与触发器（读侧；纳入 sqlc schema 列表以解析签名）
-  seed.sql               种子（基础数据 + data_scope 演示数据 + basic 归属矩阵）
+  seed.sql               种子（基础数据 + data_scope 演示数据 + basic 归属矩阵 + 菜单/日志/配置/特性/翻译）
   gen/                   生成代码（勿手改）
 perm/                    权限查询接口服务层（接口本体，传输无关；宿主自包 HTTP/gRPC）
 example/                 独立 Go module（replace => ../），业务项目接入范式
@@ -49,7 +49,7 @@ CONTEXT.md               领域术语表
 
 ## 快速开始
 
-先决条件：PostgreSQL 15+（按 basic-db-table 基线建议 18）、Go 1.26+；
+先决条件：PostgreSQL 15+（按 basic_db_table 基线建议 18）、Go 1.26+；
 本机 PostgreSQL 可达（默认 `postgres://postgresql:root@localhost:5432/postgres`）。
 
 ```bash
@@ -70,7 +70,7 @@ go run ./cmd/demo
   旧行有权操作）、改归属成功（写后同事务读回确认）、批量分配多个角色
   （一次判断，任一不通过整批拒绝；已拥有的角色跳过）
 - 权限查询接口（[18]-[23]，`perm/` 服务层）：单点判断与维度掩码选择
-  （含无效掩码 fail-closed）、批量过滤只回可见子集、功能权限码判断与
+  （含掩码 0 fail-closed）、批量过滤只回可见子集、功能权限码判断与
   枚举、可视范围三态（All/数组/空数组）、用户字段投影（@hidden 挡住
   敏感列）、范围版本双粒度失效（一人变更不风暴全租户）
 
@@ -92,8 +92,8 @@ fail-closed 校验与三态守卫谓词 `(fn IS NULL OR col = ANY(fn))`。
 
 ## 复制到新业务项目
 
-1. **带走 `sqlcpg/`**：复制目录，改 go.mod 模块名与 `sqlc.yaml` 里的
-   `runtime_import` 不变（dynq 运行时直接引用 `github.com/jninng/sqlc_gen_dynamic`）。
+1. **带走 `sqlcpg/`**：复制目录，改 go.mod 模块名；`sqlc.yaml` 里的
+   `runtime_import` 保持不变（dynq 运行时直接引用 `github.com/jninng/sqlc_gen_dynamic`）。
 2. **业务表抄 `basic` 模式**：建表带 `tenant_id` + 审计列 + 归属三元组，
    表注释挂三条守卫：
    ```sql
@@ -119,7 +119,7 @@ fail-closed 校验与三态守卫谓词 `(fn IS NULL OR col = ANY(fn))`。
 ## 边界与后续
 
 - 查询侧完备（动态 List/Count + 权限 + `perm/` 权限查询接口）；写侧以
-  **检测机制模板**形态交付（角色分配 + 归属转移两条链路端到端，其余表
+  **判定机制模板**形态交付（角色分配 + 归属转移两条链路端到端，其余表
   的写侧 named queries 与通用修改/软删流程仍为后续工作）。
 - `sys_dept` 等其余租户表不做数据范围裁剪（组织树/字典/日志为租户内
   公共数据，管理入口由功能权限控制）；需要时按 basic 模式自行加守卫。
