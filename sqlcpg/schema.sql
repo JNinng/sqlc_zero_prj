@@ -1,9 +1,5 @@
 -- public.basic 定义
 
--- Drop table
-
--- DROP TABLE public.basic;
-
 CREATE TABLE public.basic
 (
     id                  int8                                                   NOT NULL,
@@ -43,10 +39,6 @@ COMMENT ON COLUMN public.basic.owner_user_group_id IS '归属用户组 ID [@dyna
 
 -- public.sys_dept 定义
 
--- Drop table
-
--- DROP TABLE public.sys_dept;
-
 CREATE TABLE public.sys_dept
 (
     id                  int8                                                   NOT NULL,
@@ -81,8 +73,6 @@ COMMENT ON COLUMN public.sys_dept.deleted_at IS '删除时间 [@hidden]';
 COMMENT ON COLUMN public.sys_dept.tenant_id IS '租户 ID [@dynamic: exact @selectable]';
 COMMENT ON COLUMN public.sys_dept.owner_user_id IS '部门管理员用户 [@dynamic: exact, in]';
 COMMENT ON COLUMN public.sys_dept.owner_user_group_id IS '归属用户组 ID [@dynamic: exact, in]';
-
--- DROP FUNCTION public.fn_maintain_dept_closure();
 
 -- 闭包表维护触发器函数，语义约定：
 --   1. 输入校验：拒绝自身为父、父级不存在/已删除/跨租户、移入自身子树（环）
@@ -124,7 +114,7 @@ BEGIN
         END IF;
     END IF;
 
--- 移动时检测环：目标父级不能位于当前节点的子树内
+    -- 移动时检测环：目标父级不能位于当前节点的子树内
     IF (TG_OP = 'UPDATE' AND NOT v_is_soft_del AND v_new_parent_id IS NOT NULL
         AND v_new_parent_id IS DISTINCT FROM v_old_parent_id
         AND EXISTS (SELECT 1
@@ -134,13 +124,13 @@ BEGIN
         RAISE EXCEPTION '不能将部门 % 移入其自身子树（目标父级: %）', OLD.id, NEW.parent_id;
     END IF;
 
--- ================= 1. 新增 / 恢复部门 =================
+    -- ================= 1. 新增 / 恢复部门 =================
     IF (TG_OP = 'INSERT' OR v_is_restore) THEN
         -- 插入自身到自身的路径 (深度0)
         INSERT INTO sys_dept_closure (ancestor_id, descendant_id, depth, tenant_id)
         VALUES (NEW.id, NEW.id, 0, NEW.tenant_id);
 
--- 如果有父节点，复制父节点的所有祖先关系，并指向新节点（深度+1）
+        -- 如果有父节点，复制父节点的所有祖先关系，并指向新节点（深度+1）
         IF NEW.parent_id IS NOT NULL THEN
             INSERT INTO sys_dept_closure (ancestor_id, descendant_id, depth, tenant_id)
             SELECT c.ancestor_id, NEW.id, c.depth + 1, NEW.tenant_id
@@ -151,7 +141,7 @@ BEGIN
         RETURN NEW;
     END IF;
 
--- ================= 2. 删除部门（物理删除 / 软删除） =================
+    -- ================= 2. 删除部门（物理删除 / 软删除） =================
     IF (TG_OP = 'DELETE' OR v_is_soft_del) THEN
         -- 存在未删除的子部门则拒绝删除，需先处理子部门（自叶向根）
         IF EXISTS (SELECT 1
@@ -162,7 +152,7 @@ BEGIN
         END IF;
 
         -- 正确的清理范围：{X 的祖先 ∪ X} × {X 的子树}
--- 只删除经过 X 的路径，保留子树内部关系，后续移动可正常重建
+        -- 只删除经过 X 的路径，保留子树内部关系，后续移动可正常重建
         DELETE
         FROM sys_dept_closure
         WHERE descendant_id IN (SELECT descendant_id
@@ -174,7 +164,7 @@ BEGIN
         RETURN OLD;
     END IF;
 
--- ================= 3. 移动部门 (修改 parent_id) =================
+    -- ================= 3. 移动部门 (修改 parent_id) =================
     IF (TG_OP = 'UPDATE' AND v_new_parent_id IS DISTINCT FROM v_old_parent_id) THEN
         -- 步骤 A: 断开旧关系
         -- 删除 "旧祖先 -> 该节点及其子节点" 的路径
@@ -182,11 +172,10 @@ BEGIN
         FROM sys_dept_closure
         WHERE descendant_id IN (SELECT descendant_id FROM sys_dept_closure WHERE ancestor_id = OLD.id) -- 后代
           AND ancestor_id IN
-              (SELECT ancestor_id FROM sys_dept_closure WHERE descendant_id = OLD.id AND ancestor_id != OLD.id);
-        -- 旧祖先(排除自身)
+              (SELECT ancestor_id FROM sys_dept_closure WHERE descendant_id = OLD.id AND ancestor_id != OLD.id); -- 旧祖先(排除自身)
 
--- 步骤 B: 建立新关系
--- 插入 "新祖先 -> 该节点及其子节点" 的路径
+        -- 步骤 B: 建立新关系
+        -- 插入 "新祖先 -> 该节点及其子节点" 的路径
         IF NEW.parent_id IS NOT NULL THEN
             INSERT INTO sys_dept_closure (ancestor_id, descendant_id, depth, tenant_id)
             SELECT a.ancestor_id, d.descendant_id, a.depth + d.depth + 1, NEW.tenant_id
@@ -228,10 +217,6 @@ execute function fn_maintain_dept_closure();
 
 -- public.sys_dept_closure 定义
 
--- Drop table
-
--- DROP TABLE public.sys_dept_closure;
-
 CREATE TABLE public.sys_dept_closure
 (
     ancestor_id   int8        NOT NULL,
@@ -254,10 +239,6 @@ COMMENT ON COLUMN public.sys_dept_closure.tenant_id IS '租户 ID';
 
 
 -- public.sys_role 定义
-
--- Drop table
-
--- DROP TABLE public.sys_role;
 
 CREATE TABLE public.sys_role
 (
@@ -304,10 +285,6 @@ COMMENT ON COLUMN public.sys_role.tenant_id IS '租户 ID [@dynamic: exact @sele
 
 -- public.sys_role_id_scope 定义
 
--- Drop table
-
--- DROP TABLE public.sys_role_id_scope;
-
 CREATE TABLE public.sys_role_id_scope
 (
     id         int8                                                   NOT NULL,
@@ -345,10 +322,6 @@ COMMENT ON COLUMN public.sys_role_id_scope.tenant_id IS '租户 ID [@dynamic: ex
 
 -- public.sys_role_allowed_dept 定义
 
--- Drop table
-
--- DROP TABLE public.sys_role_allowed_dept;
-
 CREATE TABLE public.sys_role_allowed_dept
 (
     id         int8                                                   NOT NULL,
@@ -365,7 +338,7 @@ CREATE TABLE public.sys_role_allowed_dept
     CONSTRAINT sys_role_allowed_dept_status_chk CHECK (status IN (0, 1))
 );
 CREATE UNIQUE INDEX sys_role_allowed_dept_tenant_role_dept_un ON public.sys_role_allowed_dept USING btree (tenant_id, role_id, dept_id) WHERE deleted_at IS NULL;
-COMMENT ON TABLE public.sys_role_allowed_dept IS '角色分发部门映射表（sys_role.allowed_dept_ids 集合的落地）。判定规则：角色无映射记录=遵循通用逻辑（scope_dept_id + data_scope 兜底）；有映射=映射分发角色，显式映射优先——角色列表仅对 dept_id 命中的部门管理员可见；分配时命中映射的操作者豁免 data_scope 覆盖校验，但目标用户所属部门必须存在于映射集合中；用户最终数据访问边界仍由角色 data_scope 决定，与分配逻辑解耦 [@default_sort: created_at DESC @pk: id @page: 20/400]';
+COMMENT ON TABLE public.sys_role_allowed_dept IS '角色分发部门映射表（角色的分发部门集合）。判定规则：角色无映射记录=遵循通用逻辑（scope_dept_id 子树 + 能看见目标用户）；有映射=映射分发角色，显式映射优先——分配时命中映射的操作者豁免 data_scope 覆盖校验，但目标用户所属部门必须存在于映射集合中；角色列表按映射对部门管理员可见属宿主应用层的呈现策略；用户最终数据访问边界仍由角色 data_scope 决定，与分配逻辑解耦 [@default_sort: created_at DESC @pk: id @page: 20/400]';
 
 -- Column comments
 
@@ -382,10 +355,6 @@ COMMENT ON COLUMN public.sys_role_allowed_dept.tenant_id IS '租户 ID [@dynamic
 
 
 -- public.sys_tenant 定义
-
--- Drop table
-
--- DROP TABLE public.sys_tenant;
 
 CREATE TABLE public.sys_tenant
 (
@@ -434,10 +403,6 @@ COMMENT ON COLUMN public.sys_tenant.tenant_id IS '租户 ID [@dynamic: exact @se
 
 
 -- public.sys_user 定义
-
--- Drop table
-
--- DROP TABLE public.sys_user;
 
 CREATE TABLE public.sys_user
 (
@@ -497,10 +462,6 @@ COMMENT ON COLUMN public.sys_user.owner_user_group_id IS '归属用户组 ID [@d
 
 -- public.sys_user_role_mapping 定义
 
--- Drop table
-
--- DROP TABLE public.sys_user_role_mapping;
-
 CREATE TABLE public.sys_user_role_mapping
 (
     user_id    int8                                   NOT NULL,
@@ -524,10 +485,6 @@ COMMENT ON COLUMN public.sys_user_role_mapping.created_at IS '授予时间（创
 
 
 -- public.sys_user_group 定义
-
--- Drop table
-
--- DROP TABLE public.sys_user_group;
 
 CREATE TABLE public.sys_user_group
 (
@@ -568,10 +525,6 @@ COMMENT ON COLUMN public.sys_user_group.owner_user_id IS '组长/归属用户 [@
 
 -- public.sys_user_group_mapping 定义
 
--- Drop table
-
--- DROP TABLE public.sys_user_group_mapping;
-
 CREATE TABLE public.sys_user_group_mapping
 (
     group_id   int8                                   NOT NULL,
@@ -595,10 +548,6 @@ COMMENT ON COLUMN public.sys_user_group_mapping.created_at IS '添加时间（�
 
 
 -- public.sys_dict_type 定义
-
--- Drop table
-
--- DROP TABLE public.sys_dict_type;
 
 CREATE TABLE public.sys_dict_type
 (
@@ -635,10 +584,6 @@ COMMENT ON COLUMN public.sys_dict_type.tenant_id IS '租户 ID [@dynamic: exact 
 
 
 -- public.sys_dict_data 定义
-
--- Drop table
-
--- DROP TABLE public.sys_dict_data;
 
 CREATE TABLE public.sys_dict_data
 (
@@ -753,7 +698,6 @@ COMMENT ON COLUMN public.sys_role_menu.created_at IS '授权时间（创建时�
 
 -- ============================================================================
 -- 2. 审计日志
---    种子数据的"审计员"角色需要真实数据支撑，新增登录日志和操作日志表。
 --    日志表为追加写入（append-only），永不更新，因此省略 updated_by/updated_at/deleted_at。
 --    日志量较大，使用 bigserial 自增主键。
 -- ============================================================================

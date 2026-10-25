@@ -1,14 +1,15 @@
 -- ============================================================
 -- rls.sql — 租户隔离策略 + 读侧权限过滤函数 + 演示用户授权
 --
--- 在 schema.sql 之后执行；不是 sqlc 的输入文件。
+-- 在 schema.sql 之后执行；同时列入 sqlc.yaml 的 schema 列表，
+-- 让 queries.sql 的命名查询能解析权限过滤函数的签名（sqlc 只看签名）。
 --
 -- 内容：
 --   1. fn_touch_updated_at 触发器：UPDATE 时兜底刷新 updated_at
 --   2. 三个权限过滤函数：算出"当前用户能看到哪些用户/部门/用户组"，
 --      动态查询（List/Count）会把结果自动拼进 WHERE
---   3. 21 张租户表的 RLS 策略：会话没设置 app.tenant_id 时什么都
---      读不到、写不进（默认全拒）
+--   3. 21 张基线租户表的 RLS 策略（范围版本表策略在 expose.sql）：
+--      会话没设置 app.tenant_id 时什么都读不到、写不进（默认全拒）
 --   4. test_u 演示用户与授权（GRANT CONNECT 依赖库名，由部署方执行）
 --
 -- 这三个函数与模板仓库 basic_db_table（https://github.com/JNinng/basic_db_table）
@@ -569,7 +570,7 @@ GRANT USAGE ON SCHEMA public TO test_u;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO test_u;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO test_u;
 
--- 功能入口表对运行用户只读：写入走管理端（与 basic-db-table 的授权姿态一致）
+-- 功能入口表对运行用户只读：写入走管理端
 REVOKE INSERT, UPDATE, DELETE ON public.sys_menu, public.sys_config FROM test_u;
 
 -- 其他角色所建表不自动放行，需要时另行显式 GRANT

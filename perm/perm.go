@@ -2,9 +2,10 @@
 //
 // 面向不同进程、不同数据库的外部系统：它们的数据以归属字段引用
 // 本库的用户/部门/组 ID，需要判断可见性、拉可视范围、批量过滤、
-// 查权限码/角色/用户字段。底层与内部 @scope 守卫共用同一套库内
-// 推导函数，内外判定不分歧（ADR-0007）；HTTP/gRPC 外壳由宿主系统
-// 自行包装，本包不关心传输层。
+// 查权限码/角色/用户字段。数据范围判定与内部 @scope 守卫共用同一套
+// 库内推导函数，功能权限判定与库内 fn_has_permission 同源，内外判定
+// 不分歧（ADR-0007）；HTTP/gRPC 外壳由宿主系统自行包装，本包不关心
+// 传输层。
 //
 // 约定：
 //   - 每次调用显式传入 AuthContext（不存在跨进程共享会话），服务层
@@ -34,7 +35,8 @@ type AuthContext struct {
 
 // Dims 是维度选择掩码：1 归属人、2 归属部门、4 归属用户组，按位组合
 // 即混合（选中维度 OR 并集）；DimAll 等价 fn_can_operate_row 的全维度。
-// 无效值（0 或超出已知位）在库内一律判不可见（fail-closed）。
+// 库内只解释 1/2/4 三个位，其他位忽略；未选中任何已知维度（如 0）
+// 判不可见（fail-closed）。
 type Dims int16
 
 const (
@@ -229,8 +231,8 @@ func (s *Service) GetPermissionCodes(ctx context.Context, auth AuthContext) ([]s
 // 主数据类
 // ------------------------------------------------------------
 
-// ListVisibleUsers 在操作者的可见范围内按指定字段拉用户（需求 5：
-// 业务表加扩展列后重新生成，调用方式不变；敏感列被 @hidden 挡住）。
+// ListVisibleUsers 在操作者的可见范围内按指定字段拉用户。业务表
+// 加扩展列后重新生成，调用方式不变；敏感列被 @hidden 挡住。
 // fields 传 nil 拉全量投影；limit 0 用表级默认页大小；after 传游标
 // 续翻（与 offset 模式互斥，nil 即首页）。
 func (s *Service) ListVisibleUsers(ctx context.Context, auth AuthContext, fields []string, limit uint32, after *string) (dynq.Result[gen.SysUser], error) {

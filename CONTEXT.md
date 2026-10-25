@@ -32,7 +32,7 @@ _Avoid_: 权限降级、scope 收窄（与插件的 scopes 参数混淆）
 _Avoid_: 守卫函数（插件文档用语，同一概念）、权限函数、fn_perm_*（旧名，basic_db_table 的 fun.sql 已对齐更名为 fn_accessible_*，@scope 引用的是本项目三件套）
 
 **判断函数**:
-写数据前的权限判断函数（fn_can_* 三件）：输入操作者和操作对象，返回布尔；和写入在同一个事务里执行，false 就报错回滚。
+写数据前的权限判断函数（fn_can_* 函数族）：输入操作者和操作对象，返回布尔（批量版逐个角色返回 (role_id, ok)）；和写入在同一个事务里执行，任一不通过就报错回滚。
 _Avoid_: 判定函数、校验函数（泛指输入校验）、权限过滤函数（读侧，勿混用）
 
 **缺省拒绝 (fail-closed)**:
@@ -47,7 +47,7 @@ _Avoid_: 开放接口、对外 API（暗示网络协议层是接口本体）
 _Avoid_: 维度过滤（易与视角收窄的业务过滤混淆）
 
 **查询判断函数**:
-面向外部查询的只读判定函数族（fn_check_visible 单点、fn_filter_visible_rows 批量、fn_has_permission 功能权限轴）：与权限过滤函数、判断函数同源共用 data_scope 推导，但不与写事务绑定。fn_check_visible 带维度选择参数；存量守卫函数保持单参不动。
+面向外部查询的只读判定函数族（fn_check_visible 单点、fn_filter_visible_rows 批量、fn_has_permission 功能权限轴）：数据范围判定与权限过滤函数、判断函数同源共用 data_scope 推导，功能权限判定走角色→菜单→权限码；整族不与写事务绑定。fn_check_visible 带维度选择参数；三个权限过滤函数保持单参不动。
 _Avoid_: 判断函数（指写侧写前家族）、权限过滤函数（读侧过滤，另一概念）
 
 **范围版本**:

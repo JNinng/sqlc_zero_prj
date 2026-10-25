@@ -221,10 +221,13 @@ FROM public.sys_user u
          JOIN public.sys_menu mu ON mu.id = rm.menu_id
     AND mu.status = 1 AND mu.deleted_at IS NULL
 WHERE u.id = $1
+  AND u.status = 1
+  AND u.deleted_at IS NULL
 ORDER BY mu.permission_code
 `
 
-// 枚举用户的全部权限码（去重；前端菜单渲染、网关/远程系统缓存）
+// 枚举有效用户的全部权限码（去重；前端菜单渲染、网关/远程系统缓存）。
+// 用户无效（不存在/禁用/删除）时返回空集
 func (q *Queries) GetPermissionCodes(ctx context.Context, userID int64) ([]string, error) {
 	rows, err := q.db.Query(ctx, getPermissionCodes, userID)
 	if err != nil {
@@ -294,13 +297,17 @@ const getUserRoles = `-- name: GetUserRoles :many
 SELECT r.id, r.status, r.name, r.code, r.role_type, r.data_scope, r.scope_dept_id, r.remark, r.created_by, r.created_at, r.updated_by, r.updated_at, r.deleted_at, r.tenant_id
 FROM public.sys_role r
          JOIN public.sys_user_role_mapping m ON m.role_id = r.id
+         JOIN public.sys_user u ON u.id = m.user_id
 WHERE m.user_id = $1
+  AND u.status = 1
+  AND u.deleted_at IS NULL
   AND r.status = 1
   AND r.deleted_at IS NULL
 ORDER BY r.id
 `
 
-// 枚举用户的全部有效角色（展示/审计/外部缓存角色变更）
+// 枚举有效用户的全部有效角色（展示/审计/外部缓存角色变更）。
+// 用户无效（不存在/禁用/删除）时返回空集
 func (q *Queries) GetUserRoles(ctx context.Context, userID int64) ([]SysRole, error) {
 	rows, err := q.db.Query(ctx, getUserRoles, userID)
 	if err != nil {

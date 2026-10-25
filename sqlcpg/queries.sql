@@ -88,17 +88,22 @@ SELECT public.fn_accessible_user_ids(sqlc.arg('operator'))::int8[] AS user_ids,
        public.fn_accessible_dept_ids(sqlc.arg('operator'))::int8[] AS dept_ids,
        public.fn_accessible_group_ids(sqlc.arg('operator'))::int8[] AS group_ids;
 
--- 枚举用户的全部有效角色（展示/审计/外部缓存角色变更）
+-- 枚举有效用户的全部有效角色（展示/审计/外部缓存角色变更）。
+-- 用户无效（不存在/禁用/删除）时返回空集
 -- name: GetUserRoles :many
 SELECT r.*
 FROM public.sys_role r
          JOIN public.sys_user_role_mapping m ON m.role_id = r.id
+         JOIN public.sys_user u ON u.id = m.user_id
 WHERE m.user_id = sqlc.arg('user_id')
+  AND u.status = 1
+  AND u.deleted_at IS NULL
   AND r.status = 1
   AND r.deleted_at IS NULL
 ORDER BY r.id;
 
--- 枚举用户的全部权限码（去重；前端菜单渲染、网关/远程系统缓存）
+-- 枚举有效用户的全部权限码（去重；前端菜单渲染、网关/远程系统缓存）。
+-- 用户无效（不存在/禁用/删除）时返回空集
 -- name: GetPermissionCodes :many
 SELECT DISTINCT mu.permission_code
 FROM public.sys_user u
@@ -109,6 +114,8 @@ FROM public.sys_user u
          JOIN public.sys_menu mu ON mu.id = rm.menu_id
     AND mu.status = 1 AND mu.deleted_at IS NULL
 WHERE u.id = sqlc.arg('user_id')
+  AND u.status = 1
+  AND u.deleted_at IS NULL
 ORDER BY mu.permission_code;
 
 -- 取范围版本（缓存失效信号，ADR-0008）：租户级 + 用户级一次取回，

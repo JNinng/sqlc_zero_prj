@@ -6,4 +6,4 @@ sqlc_gen_dynamic v0.1.2 新增 `in_any` 数组三态守卫，生成谓词 `(fn(.
 
 - in_any 是**显式放行**方向（与 `in` 的 fail-closed 相反）：函数侧纪律——NULL 只能由 data_scope=7 分支返回，别处写错返回 NULL 会放开整表；CASE 判序保证用户无效/漏设租户时走 `'{}'` 拒绝分支（my_roles 为空即不可能命中 7 分支）。
 - fn 在谓词中出现两次（IS NULL 判别 + ANY 匹配），STABLE 函数两次求值结果一致，无一致性风险。
-- 与 [basic_db_table](https://github.com/JNinng/basic_db_table) fun.sql 的守卫函数完全同构（时称 fn_perm_*，模板已对齐更名为 fn_accessible_*）；跨租户边界仍由 RLS 承担（NULL 放行只放行当前租户内全部行）。
+- 与 [basic_db_table](https://github.com/JNinng/basic_db_table) fun.sql 的 fn_accessible_* 三件套完全同构；跨租户边界仍由 RLS 承担（NULL 放行只放行当前租户内全部行）。

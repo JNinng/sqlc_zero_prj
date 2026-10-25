@@ -41,7 +41,8 @@ type Querier interface {
 	// 按 id 锁定并读取一行 basic（FOR UPDATE）：改归属前先拿到它
 	// 现在的归属值，防止并发修改后按旧值判断
 	GetBasicForUpdate(ctx context.Context, id int64) (Basic, error)
-	// 枚举用户的全部权限码（去重；前端菜单渲染、网关/远程系统缓存）
+	// 枚举有效用户的全部权限码（去重；前端菜单渲染、网关/远程系统缓存）。
+	// 用户无效（不存在/禁用/删除）时返回空集
 	GetPermissionCodes(ctx context.Context, userID int64) ([]string, error)
 	// 一次取回三个维度的可见集合（三件套一条 SQL 同返，省往返）。
 	// 三态契约：列 NULL = 全租户不过滤（perm 层翻成 All=true），
@@ -50,7 +51,8 @@ type Querier interface {
 	// 取范围版本（缓存失效信号，ADR-0008）：租户级 + 用户级一次取回，
 	// 缓存有效性 = 两个版本都未变。行不存在时返回 0；RLS 已限本租户
 	GetScopeVersion(ctx context.Context, userID int64) (GetScopeVersionRow, error)
-	// 枚举用户的全部有效角色（展示/审计/外部缓存角色变更）
+	// 枚举有效用户的全部有效角色（展示/审计/外部缓存角色变更）。
+	// 用户无效（不存在/禁用/删除）时返回空集
 	GetUserRoles(ctx context.Context, userID int64) ([]SysRole, error)
 	// 判断用户是否持有某功能权限码（角色→菜单→权限码，与数据范围正交）
 	HasPermission(ctx context.Context, arg HasPermissionParams) (bool, error)

@@ -1,16 +1,17 @@
 -- ======================================================================
 -- seed.sql — 种子数据
--- 依赖：schema.sql → rls.sql 之后执行（RLS 已启用，种子需以超级用户/
--- 表 owner 连接执行，超级用户绕过 RLS）。
+-- 依赖：schema.sql → rls.sql → operate.sql → expose.sql 之后执行
+-- （RLS 已启用，种子需以超级用户/表 owner 连接执行，超级用户绕过 RLS；
+-- expose.sql 必须先于本文件，角色映射写入要触发范围版本 bump）。
 --
 -- 组成：
---   1. 基础种子（租户/部门/角色/用户/用户组/字典），与 basic-db-table
---      的 data.sql 同源；
---   2. 数据范围演示数据（新增角色 106-109 覆盖 data_scope=2/4/5/6，
---      新增用户 6-9 各持单一演示角色），使守卫函数 7 档语义逐档可验；
---   3. basic 表归属矩阵（11 行，覆盖 owner 三元组各维度 + 无归属行 +
+--   1. 基础种子（租户/部门/角色/用户/用户组/字典）；
+--   2. 数据范围演示数据（角色 106-109 覆盖 data_scope=2/4/5/6，
+--      用户 6-9 各持单一演示角色），使守卫函数 7 档语义逐档可验；
+--   3. basic 表归属矩阵（11 行，覆盖归属三元组各维度 + 无归属行 +
 --      跨租户对照行），期望可见性见 example/cmd/demo 场景断言；
---   4. data_enhance 同源种子（菜单/日志/配置/特性开关/翻译）。
+--   4. 功能权限演示种子（菜单/角色菜单/登录与操作日志/系统与租户配置/
+--      特性开关/翻译）。
 --
 -- 密码统一为 "123456"（scrypt 加密）；演示无登录流程，直接以种子用户身份运行。
 -- ======================================================================
@@ -394,18 +395,18 @@ VALUES (11, 1, 1, '2026-06-01 10:10:00.000', 1, '2026-06-01 10:10:00.000', NULL,
 --     id=1..10 属 t-super-01；id=11 属 t-demo-01（跨租户对照行，
 --     即使 data_scope=7 也不可见——RLS 租户隔离兜底）。
 --     各行期望可见性见 example/cmd/demo 场景断言：
---       1  owner_user_id=3           → S1(lisi)/S4(wujiu)/S8(zhangsan)
---       2  owner_dept_id=2           → S3(zhouba 子树)/S8(zhangsan scope1 本部门分支)
---       3  owner_dept_id=7           → S2(sunqi)/S3(zhouba 子树)
---       4  owner_user_id=4           → S4(wujiu)/S8(zhangsan 组成员)
---       5  owner_dept_id=5           → S5(zhengshi)
---       6  owner_user_group_id=2     → S8(zhangsan 组守卫)
---       7  owner_user_id=2           → S8(zhangsan 本人)
---       8  无归属                    → 仅 data_scope=7 可见：守卫返回 NULL
+--       1  owner_user_id=3           → lisi / wujiu / zhangsan（用户组 2 成员）
+--       2  owner_dept_id=2           → zhouba（子树）/ zhangsan（仅本人档位含本部门）
+--       3  owner_dept_id=7           → sunqi（本部门）/ zhouba（子树）
+--       4  owner_user_id=4           → wujiu（指定人）/ zhangsan（用户组 2 成员）
+--       5  owner_dept_id=5           → zhengshi（指定部门）
+--       6  owner_user_group_id=2     → zhangsan（用户组档位）
+--       7  owner_user_id=2           → zhangsan（仅本人）
+--       8  无归属                    → 仅 data_scope=7（admin）可见：守卫返回 NULL
 --                                     放行全部（in_any 三态，ADR-0005）；
 --                                     其余档位对 NULL 归属恒不命中
---       9  owner_user_id=6           → S2(sunqi 本人)
---       10 owner_dept_id=8           → S3(zhouba 子树，部门 8 无成员)
+--       9  owner_user_id=6           → sunqi（仅本人）
+--       10 owner_dept_id=8           → zhouba（子树，部门 8 无成员）
 --       11 t-demo-01/owner_user_id=5 → 仅 t-demo-01 租户内
 -- ===========================
 
@@ -426,16 +427,10 @@ ON CONFLICT DO NOTHING;
 
 
 -- ===========================
--- 12. data_enhance 同源种子（菜单/角色菜单/登录与操作日志/系统与租户配置/
---     特性开关/翻译），与 basic-db-table 的 data_enhance.sql 同源，原文追加。
---     功能权限维度（sys_menu 权限码）的演示数据，不参与行级守卫场景。
+-- 12. 功能权限演示种子（菜单/角色菜单/登录与操作日志/系统与租户配置/
+--     特性开关/翻译）。功能权限维度（sys_menu 权限码）的演示数据，
+--     不参与行级守卫场景。
 -- ===========================
-
--- ======================================================================
--- 业务增强种子数据
--- 配合 enhance.sql 使用，为新增表填充示例数据
--- 依赖于 data.sql 中已存在的租户/角色/用户
--- ======================================================================
 
 -- ======================================================================
 -- 1. 菜单/权限表 (sys_menu)
